@@ -6,8 +6,8 @@ import os
 
 
 year = 2025
-startday = pd.Timestamp(year, 6, 1)  # TODO: UPDATE with actual start date
-endday = pd.Timestamp(year, 8, 31)  # TODO: UPDATE with actual end date
+startday = pd.Timestamp(year, 7, 21)  # TODO: UPDATE with actual start date
+endday = pd.Timestamp(year, 10, 6)  # TODO: UPDATE with actual end date
 weather_station_id = '10929'  # Konstanz weather station ID (verify this)
 
 # SINGLE HIVE SETUP
@@ -21,23 +21,29 @@ cam_hive_map = {0: "A", 1: "A"}
 
 
 
-# Trajectory processing paths
+# Trajectory and detection processing paths
 basedir = Path('/mnt/share/beesbook2025/')
-trackdir = basedir / 'data_tracked'
+trackdir = basedir / 'results/data_tracked'
+alldetectiondir = basedir / 'results/data_alldetections'
 traj_outdir = Path(os.path.join(basedir,'trajectory_data/'))
 metrics_dir = basedir / 'metrics'
 # Feeder/exit cam data (raw detections and daily aggregates)
-feedercam_input_dir = Path(os.path.join(basedir,'pi/')_
+feedercam_input_dir = Path(os.path.join(basedir,'pi/'))
 feedercam_daily_dir = Path(os.path.join(basedir,'pi_data_alldetections/'))
 feedercam_avg_dir = feedercam_daily_dir / 'avgcounts'
 
 # Local outputs
-saved_output_dir = Path('saved_output')
+saved_output_dir = Path(os.path.join(basedir,'saved_output'))
 
 # Calibration assets (update per environment)
 # TODO: UPDATE these paths to match the konstanz machine data location
 comb_images_root = Path(os.path.join(basedir,"comb_background"))
 calib_xml_dir = Path(os.path.join(comb_images_root, "corner_and_frame_annotations"))
+# Comb annotation paths (derived from comb_images_root)
+annotations_dir = comb_images_root / "annotations"
+annotation_grids_dir = comb_images_root / "annotation_grids"
+# Label configuration (shared across all experiments)
+label_config_path = Path(__file__).parent / "label_classes.json"
 
 
 ## '4-frame representation' and pixel distances
@@ -47,7 +53,7 @@ frame_width_cm = 37.6
 
 ## pixel and image sizes
 # note:  using 'image rotation', which is always applied to the trajectories
-ypixels, xpixels = (5312, 4608)  # Original (pre-rotation) dimensions
+ypixels, xpixels = (5312, 4608)  # Rotated (analysis coordinate frame) dimensions
 
 # Camera rotation configuration
 # Options: 'none', 'cw90' (clockwise 90°), 'ccw90' (counter-clockwise 90°), '180'

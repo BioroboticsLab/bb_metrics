@@ -7,9 +7,9 @@ import gzip
 from datetime import datetime
 import pandas as pd
 
-import definitions_2025 as bd
-import datafunctions as dfunc
-dfunc.init(bd)
+from . import get_config
+from . import datafunctions as dfunc
+
 
 max_delay = 1 # in seconds - don't calculate speed or turning velocity if speed if delay is greater than this
 time_outside_trip = 60*2  # seconds
@@ -31,21 +31,22 @@ def get_bin_indices_vectorized(x_array, y_array, cam):
     x_array, y_array, cam_array are 1D NumPy arrays.
     Returns (ix, iy) also as 1D arrays.
     """
-    # SHIFT X by (camera * bd.xpixels)
+    cfg = get_config()
+    # SHIFT X by (camera * cfg.xpixels)
     # NOTE: dfunc.get_hive_cam0 might be a function that returns 0 or 1.
     #       If it depends on the camera array, either vectorize it or just do a known mapping.
     # Example (if hive A uses cams 0,1 => get_hive_cam0(cam) == 0 for both):
     # For a general approach, we might do:
     offset = dfunc.get_hive_cam0(cam)  # or a vector approach
-    x_adj = x_array + (cam - offset) * bd.xpixels
+    x_adj = x_array + (cam - offset) * cfg.xpixels
 
     # searchsorted for X, Y
-    ix = np.searchsorted(bd.x_edges, x_adj, side='right') - 1
-    iy = np.searchsorted(bd.y_edges, y_array, side='right') - 1
+    ix = np.searchsorted(cfg.x_edges, x_adj, side='right') - 1
+    iy = np.searchsorted(cfg.y_edges, y_array, side='right') - 1
 
     # clamp
-    max_ix = len(bd.x_edges) - 2
-    max_iy = len(bd.y_edges) - 2
+    max_ix = len(cfg.x_edges) - 2
+    max_iy = len(cfg.y_edges) - 2
     ix = np.clip(ix, 0, max_ix)
     iy = np.clip(iy, 0, max_iy)
 
@@ -80,15 +81,16 @@ def find_closest_indices(ts_values, sorted_key_values):
 
 def sum_counts_in_layer(xyhist, ix, iy, d):
     """
-    Sums xyhist counts in the neighborhood of (ix, iy) 
+    Sums xyhist counts in the neighborhood of (ix, iy)
     with Chebyshev distance <= d, using direct NumPy slicing.
 
     We avoid building a list of neighbors, which was slow in Python,
     and let NumPy handle the sub-block summation in compiled code.
     """
+    cfg = get_config()
     # xyhist.shape: (num_x_bins, num_y_bins)
-    x_max = bd.numxbins - 1
-    y_max = bd.numybins - 1
+    x_max = cfg.numxbins - 1
+    y_max = cfg.numybins - 1
     
     # Compute bounding box
     ix_min = max(0, ix - d)
@@ -122,12 +124,13 @@ def get_surrounding_bins(ix, iy, d, x_max, y_max):
 
 def sum_counts_in_layer_loop(xyhist, ix, iy, d):
     """
-    Sums xyhist counts in the neighborhood of (ix, iy) 
+    Sums xyhist counts in the neighborhood of (ix, iy)
     with Chebyshev distance <= d.
     """
+    cfg = get_config()
     # xyhist.shape: (num_x_bins, num_y_bins)
-    x_max = bd.numxbins - 1
-    y_max = bd.numybins - 1
+    x_max = cfg.numxbins - 1
+    y_max = cfg.numybins - 1
     neighbor_bins = get_surrounding_bins(ix, iy, d, x_max, y_max)
     total = 0.0
     for (nx, ny) in neighbor_bins:
@@ -143,12 +146,13 @@ def sum_counts_3distances(xyhist, ix, iy):
 
     If (ix, iy) is near an edge, it's clipped accordingly.
     """
+    cfg = get_config()
 
     if type(xyhist)==float: # this happens if the xyhist is nan.  This can only happen if the all detections data was not processed, but the tagged bees were, for a certain time period
         return np.nan, np.nan, np.nan
     # xyhist.shape: (num_x_bins, num_y_bins)
-    x_max = bd.numxbins - 1
-    y_max = bd.numybins - 1
+    x_max = cfg.numxbins - 1
+    y_max = cfg.numybins - 1
 
     # -------------------
     # d=0 => single cell
@@ -249,6 +253,7 @@ def datafile_to_metrics(
     grid_lookup=None,
     comb_label_order=None,
 ):
+    cfg = get_config()
     try:
         metrics_dir = Path(metrics_dir)
         # Disable xyhist writes for fine-grained bins to avoid huge files/HDF clashes
@@ -299,7 +304,7 @@ def datafile_to_metrics(
         # Calculate 'flat' hive coordinates
         # This is done by simply reversing x of the back side camera to "fold it" onto the front one.  Using frame_width_cm to do this
         cam1 = dfunc.get_hive_cam0(df['cam_id']) + 1
-        df.loc[df['cam_id'] == cam1, 'x_hive_flat'] = bd.frame_width_cm - df.loc[df['cam_id'] == cam1, 'x_hive']
+        df.loc[df['cam_id'] == cam1, 'x_hive_flat'] = cfg.frame_width_cm - df.loc[df['cam_id'] == cam1, 'x_hive']
 
         # Initialize an empty list to store metrics for all time segments
         metrics_list = []
@@ -455,6 +460,7 @@ def _compute_combhist(dfbee, grid_lookup, comb_label_order=None):
 
 def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
     """Input is dfbee, already selected for a certain amount of time."""
+    cfg = get_config()
     dfbee = dfbee.sort_values(by='timestamp')
     dfbee = dfbee.reset_index(drop=True)
     cam0 = dfunc.get_hive_cam0(dfbee['cam_id'])
@@ -562,18 +568,13 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
     # get shift coordinates
     #  shift the y pixels for ones on frame 2 (back side, bottom), to define the 'shortest path' to the exit
     y_exitdist = dfbee['y_hive'].copy()
-    sel = (dfbee['cam_id']==cam0+1)&(dfbee['y_hive']<bd.offset_div_cm)
-    y_exitdist[sel] = 2*bd.offset_div_cm-y_exitdist[sel]
+    sel = (dfbee['cam_id']==cam0+1)&(dfbee['y_hive']>-cfg.offset_div_cm)
+    y_exitdist[sel] = -2*cfg.offset_div_cm - y_exitdist[sel]
     exitdist = np.sqrt( (dfbee['x_hive_flat']-x_exit)**2 + (y_exitdist-y_exit)**2 )    
     exitdist_median = np.median(exitdist)    
 
-    # Distance from top feeder
-    x_topfeeder, y_topfeeder = 32.8, 45  # use hardcoded values in cm.  measure this from the images directly
-    topfeederdist = np.sqrt( (dfbee['x_hive_flat']-x_topfeeder)**2 + (dfbee['y_hive']-y_topfeeder)**2 )    
-    topfeederdist_median = np.median(topfeederdist)
-
     # Distance from center of current frame
-    framebins = [-10, bd.offset_div_cm, bd.offset_div_cm*2+10 ] # set limits to cover the frame.  bins are the same for each camera now
+    framebins = [-cfg.offset_div_cm*2-10, -cfg.offset_div_cm, 10] # set limits to cover the frame (negative y_hive coords)
     # get 'framenum' as digitized label
     currentframe = np.tile(np.nan,len(dfbee))
     sel0, sel1 = dfbee['cam_id']==cam0, dfbee['cam_id']==cam0+1
@@ -584,8 +585,8 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
     if sel1.any():
         currentframe[sel1] = np.digitize(dfbee.loc[sel1, 'y_hive'], framebins) - 1 + 2
     # Calculate frame centers
-    x_center = bd.frame_width_cm/2
-    bottomcenter, topcenter = 0.5*bd.offset_div_cm, 1.5*bd.offset_div_cm
+    x_center = cfg.frame_width_cm/2
+    bottomcenter, topcenter = -0.5*cfg.offset_div_cm, -1.5*cfg.offset_div_cm
 
     y_centers = {0: bottomcenter, 1: topcenter, 2: bottomcenter, 3: topcenter}
     # Loop through each frame number and calculate the median distance
@@ -613,7 +614,7 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
             numtrips = numtrips+1       
 
     # Fraction squares visited in this time period
-    fraction_squares_visited = np.nansum(xyhist>0)/(bd.numxbins*bd.numybins)
+    fraction_squares_visited = np.nansum(xyhist>0)/(cfg.numxbins*cfg.numybins)
 
     # Add bee_id to the dictionary
     bee_id = dfbee['bee_id'].iloc[0]
@@ -628,7 +629,6 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
         'num_trips': numtrips,
         'fraction_squares_visited': fraction_squares_visited,
         'exit_distance_median': exitdist_median,
-        'topfeeder_distance_median': topfeederdist_median,
         'frame_0_hist': framehist[0, 0],
         'frame_1_hist': framehist[0, 1],
         'frame_2_hist': framehist[1, 0],

@@ -64,3 +64,5 @@ Thumbs.db
 # Local outputs and data (if any)
 saved_output/
 *.log
+/__pycache__
+/__pycache__

@@ -586,6 +586,7 @@ def plot_annotated_row(
     rgba_grid=None,
     raw_w=None,
     raw_h=None,
+    print_debug=False,
 ):
     """
     Plot annotated comb image with cell labels.
@@ -657,14 +658,43 @@ def plot_annotated_row(
     img = plt.imread(img_path)
     h_orig, w_orig = img.shape[:2]
 
+    if print_debug:
+        print("=" * 70)
+        print(f"DEBUG: plot_annotated_row")
+        print("=" * 70)
+        print(f"Image path: {img_path.name}")
+        print(f"Original image shape (loaded): h={h_orig}, w={w_orig}")
+        print(f"use_rotation_config: {use_rotation_config}")
+        print(f"rotate_clockwise param: {rotate_clockwise}")
+        if use_rotation_config and rot_cfg is not None:
+            print(f"Rotation config found:")
+            print(f"  - rotation type: {rot_cfg.rotation}")
+            print(f"  - numpy_rot90_k: {rot_cfg.numpy_rot90_k()}")
+            print(f"  - original_width: {rot_cfg.original_width}")
+            print(f"  - original_height: {rot_cfg.original_height}")
+
     # Apply rotation for display
+    rotation_applied = False
+    rotation_k = 0
     if use_rotation_config and rot_cfg is not None:
         k = rot_cfg.numpy_rot90_k()
         if k != 0:
             img = np.rot90(img, k=k)
+            rotation_applied = True
+            rotation_k = k
     elif rotate_clockwise:
         # Fallback for backward compatibility
         img = np.rot90(img, k=-1)
+        rotation_applied = True
+        rotation_k = -1
+
+    if print_debug:
+        print(f"Rotation applied: {rotation_applied}")
+        if rotation_applied:
+            print(f"  - numpy rot90 k value: {rotation_k}")
+            print(f"  - rotated image shape: h={img.shape[0]}, w={img.shape[1]}")
+        else:
+            print(f"  - no rotation applied")
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -741,6 +771,17 @@ def plot_annotated_row(
         with open(ann_path, "r") as f:
             cells = json.load(f)
 
+        if print_debug:
+            print(f"\nAnnotation mode:")
+            print(f"  - annotation file: {ann_path.name}")
+            print(f"  - number of cells: {len(cells)}")
+            if cells:
+                x_coords = [c["center_x"] for c in cells]
+                y_coords = [c["center_y"] for c in cells]
+                print(f"  - X range in annotations: [{min(x_coords):.1f}, {max(x_coords):.1f}]")
+                print(f"  - Y range in annotations: [{min(y_coords):.1f}, {max(y_coords):.1f}]")
+
+        first_cell_printed = False
         for cell in cells:
             label = normalize_label(cell["label"], keep_labels, other_label)
             base_rgba = hex_to_rgba(label_color_hex.get(label, "#ff00ff"))
@@ -756,13 +797,26 @@ def plot_annotated_row(
             # Transform annotation coordinates for display on rotated image
             if use_rotation_config and rot_cfg is not None:
                 x_plot, y_plot = rot_cfg.transform_annotation_coords(x, y)
+                transform_method = "rotation_config"
             elif rotate_clockwise:
                 # Fallback for backward compatibility (assumes cw90)
                 x_plot = h_orig - 1 - y
                 y_plot = x
+                transform_method = "fallback_cw90"
             else:
                 x_plot = x
                 y_plot = y
+                transform_method = "none"
+
+            if print_debug and not first_cell_printed:
+                print(f"\nCoordinate transformation (first cell example):")
+                print(f"  - transform method: {transform_method}")
+                print(f"  - annotation coords: x={x:.1f}, y={y:.1f}")
+                print(f"  - display coords:    x={x_plot:.1f}, y={y_plot:.1f}")
+                if transform_method == "fallback_cw90":
+                    print(f"  - formula: x_plot = h_orig - 1 - y = {h_orig} - 1 - {y:.1f} = {x_plot:.1f}")
+                    print(f"            y_plot = x = {y_plot:.1f}")
+                first_cell_printed = True
 
             circle = Circle(
                 (x_plot, y_plot),

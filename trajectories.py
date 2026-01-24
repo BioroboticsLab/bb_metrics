@@ -24,6 +24,8 @@ def filter_speed_jumps(df: pd.DataFrame, min_num_obs: int, max_speed: float = 3.
     bee_groups = df.groupby("bee_id")
     filtered_bees = []
     for _, dfbee in bee_groups:
+        # Reset index to avoid index alignment warnings
+        dfbee = dfbee.reset_index(drop=True)
         numobs = len(dfbee)
         if numobs < min_num_obs:
             continue
@@ -34,7 +36,8 @@ def filter_speed_jumps(df: pd.DataFrame, min_num_obs: int, max_speed: float = 3.
             speed = np.sqrt(dfbee["x_hive"].diff() ** 2 + dfbee["y_hive"].diff() ** 2) / dtimes
             samecamera = dfbee["cam_id"].diff().fillna(0) == 0
             error_frames = (speed > max_speed) & samecamera
-            dfbee = dfbee[~error_frames]
+            # Reset index after filtering to keep indices aligned
+            dfbee = dfbee[~error_frames].reset_index(drop=True)
             numerrorframes = error_frames.sum()
             numobs = len(dfbee)
 
@@ -43,7 +46,7 @@ def filter_speed_jumps(df: pd.DataFrame, min_num_obs: int, max_speed: float = 3.
 
     if not filtered_bees:
         return df.iloc[0:0]
-    return pd.concat(filtered_bees)
+    return pd.concat(filtered_bees, ignore_index=True)
 
 
 def get_valid_tags(dftags: Optional[pd.DataFrame], camdate, hive: str) -> Optional[list]:

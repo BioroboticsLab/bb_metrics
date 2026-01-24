@@ -3,7 +3,15 @@ import pandas as pd
 import numbers
 import re
 from datetime import datetime, timezone
-from meteostat import Hourly, Daily
+try:
+    from meteostat import Hourly as _MSHourly, Daily as _MSDaily
+except Exception:
+    _MSHourly = None
+    _MSDaily = None
+try:
+    import meteostat as _meteostat
+except Exception:
+    _meteostat = None
 import json, os
 from pathlib import Path
 import dill
@@ -60,16 +68,25 @@ def get_weather_data(station_id, start_date, end_date, data_type='hourly'):
         pandas.DataFrame: A dataframe containing the weather data.
     """
     # Fetch the weather data between the start_date and end_date
-    if data_type == 'hourly':
-        weatherdata = Hourly(station_id, start_date, end_date)
-        weatherdata = weatherdata.fetch()
-    elif data_type == 'daily':
-        weatherdata = Daily(station_id, start_date, end_date)
-        weatherdata = weatherdata.fetch()
-    else:
+    if data_type not in {'hourly', 'daily'}:
         print('data_type can be hourly or daily')
-        weatherdata = np.nan
-    return weatherdata
+        return np.nan
+
+    # Meteostat API compatibility: class-based (Hourly/Daily) or module-level functions (hourly/daily)
+    if _MSHourly is not None and _MSDaily is not None:
+        klass = _MSHourly if data_type == 'hourly' else _MSDaily
+        return klass(station_id, start_date, end_date).fetch()
+
+    if _meteostat is not None:
+        if hasattr(_meteostat, 'Hourly') and hasattr(_meteostat, 'Daily'):
+            klass = _meteostat.Hourly if data_type == 'hourly' else _meteostat.Daily
+            return klass(station_id, start_date, end_date).fetch()
+        if hasattr(_meteostat, 'hourly') and hasattr(_meteostat, 'daily'):
+            func = _meteostat.hourly if data_type == 'hourly' else _meteostat.daily
+            data = func(station_id, start_date, end_date)
+            return data.fetch() if hasattr(data, 'fetch') else data
+
+    raise ImportError("meteostat API not found; expected Hourly/Daily classes or hourly/daily functions")
 
 
 ## the bb_monitory function has input 'numdays', and this should simply get all
@@ -267,7 +284,7 @@ def get_corner_point_for_date(cam: int, ts, merged: pd.DataFrame):
 
     return float(row['corner_x']), float(row['corner_y']), row
 
-def pixels_to_cm(
+def pixels_to_hive_coordinates(
     x: np.ndarray,
     y: np.ndarray,
     date,                 # array-like of timestamps or a single timestamp
@@ -348,7 +365,7 @@ def pixels_to_cm(
         # Re-order to original idx order
         m1 = m1.set_index(pd.Index(idx)).loc[idx]
 
-        # Compute cm using the chosen bottom-left corner
+        # Compute cm relative to corner point (physical bottom-left of hive frame)
         x_hive[idx] = (x[idx] - m1["corner_x"].to_numpy()) * cm_per_pixel
         y_hive[idx] = (y[idx] - m1["corner_y"].to_numpy()) * cm_per_pixel
 
@@ -371,11 +388,9 @@ def get_tracked_dataframe(
 
     Optional:
       If both `df_cornerpoints` and `df_px_per_cm` are provided, add:
-        ['x_hive', 'y_hive']  — cm-space coordinates computed via `pixels_to_cm`.
+        ['x_hive', 'y_hive']  — cm-space coordinates computed via `pixels_to_hive_coordinates`.
     """
     filename = Path(filename)
-
-
 
     # Parse dill
     columns = [
@@ -405,8 +420,8 @@ def get_tracked_dataframe(
 
     if not df.empty:
         # Transform coordinates using rotation configuration
-        # Detection pipeline outputs (x_rot, y_rot) in rotated image coords (origin top-left)
-        # We need coordinates with origin at bottom-left to match calibration coordinate system
+        # Detection pipeline outputs (x_rot, y_rot) in rotated image coords
+        # Transform to original image coordinates (top-left origin)
         from . import get_config
         from .rotation import get_rotation_config
 
@@ -437,7 +452,7 @@ def get_tracked_dataframe(
         # Optional pixels->cm conversion (vectorized per-cam under the hood)
         if df_cornerpoints is not None and df_px_per_cm is not None:
             try:
-                x_hive, y_hive = pixels_to_cm(
+                x_hive, y_hive = pixels_to_hive_coordinates(
                     x=df['x_pixels'].to_numpy(),
                     y=df['y_pixels'].to_numpy(),
                     date=df['timestamp'].to_numpy(),
@@ -512,13 +527,12 @@ def get_hive_cam0(camera):
     return cam0
 
 # returns counts of which 'frame' of the observation hive a bees was on
-## NEXT:  CONVERT THIS TO USING Y_HIVE INSTEAD - AND THEN SET THE DIVS TO (REASONABLE) ADDED VALUES THAT DEFINITELY GET THE RANGE, E.G. +10CM
 def getframehist(y,camera):
     # input: y as hive coordinates in cm
     # note:  in 2024 and other analysis this used pixel coordinates, but now using hive coordinates because the middle div is defined in cm
     bd_cfg = _get_bd()
     cam0 = get_hive_cam0(camera)
-    bins = [-10, bd_cfg.offset_div_cm, bd_cfg.offset_div_cm*2+10 ] # set limits to cover the frame.  bins are the same for each camera now
+    bins = [-bd_cfg.offset_div_cm*2-10, -bd_cfg.offset_div_cm, 10] # set limits to cover the frame (negative y_hive coords)
     vals_l = np.histogram(y[camera==cam0],bins=bins)[0] 
     vals_r = np.histogram(y[camera==cam0+1],bins=bins)[0]        
     return np.array([vals_l,vals_r]) 
@@ -697,118 +711,6 @@ def hex_to_rgba(hex_color: str):
 def with_alpha(rgba, a):
     return (rgba[0], rgba[1], rgba[2], a)
 
-
-def plot_annotated_row(
-    row,
-    label_color_hex,
-    label_order,
-    keep_labels,
-    other_label,
-    alpha_fill=0.25,
-    alpha_edge=0.1,
-    fill_empty_cell=False,
-    empty_label="empty_cell",
-    rotate_clockwise=True,
-    cmap="gray",
-    figsize=(10, 7),
-    ax=None,
-    show=True,
-):
-    img_path = Path(row["path"])
-    ann_path = Path(row["annotation_path"])
-
-    with open(ann_path, "r") as f:
-        cells = json.load(f)
-
-    # Get rotation config if available
-    try:
-        from .rotation import get_rotation_config
-        cfg = get_config()
-        rot_cfg = get_rotation_config(cfg)
-        use_rotation_config = True
-    except Exception:
-        rot_cfg = None
-        use_rotation_config = False
-
-    img = plt.imread(img_path)
-    h, _ = img.shape[:2]
-
-    # Apply rotation for display
-    if use_rotation_config and rot_cfg is not None:
-        k = rot_cfg.numpy_rot90_k()
-        if k != 0:
-            img = np.rot90(img, k=k)
-    elif rotate_clockwise:
-        img = np.rot90(img, k=-1)
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    ax.imshow(img, cmap=cmap)
-
-    for cell in cells:
-        label = normalize_label(cell["label"], keep_labels, other_label)
-        base_rgba = hex_to_rgba(label_color_hex.get(label, "#ff00ff"))
-
-        if label == empty_label and not fill_empty_cell:
-            face_rgba = with_alpha(base_rgba, 0.0)
-        else:
-            face_rgba = with_alpha(base_rgba, alpha_fill)
-
-        x = cell["center_x"]
-        y = cell["center_y"]
-
-        # Transform annotation coordinates for display on rotated image
-        if use_rotation_config and rot_cfg is not None:
-            x_plot, y_plot = rot_cfg.transform_annotation_coords(x, y)
-        elif rotate_clockwise:
-            x_plot = h - 1 - y
-            y_plot = x
-        else:
-            x_plot = x
-            y_plot = y
-
-        circle = Circle(
-            (x_plot, y_plot),
-            cell["radius"],
-            edgecolor=with_alpha(base_rgba, alpha_edge),
-            facecolor=face_rgba,
-            linewidth=1.0,
-        )
-        ax.add_patch(circle)
-
-    mapped_labels = {normalize_label(c["label"], keep_labels, other_label) for c in cells}
-    legend_labels = [lbl for lbl in label_order[:5] if lbl in mapped_labels]
-    for lbl in sorted(mapped_labels):
-        if lbl not in legend_labels:
-            legend_labels.append(lbl)
-
-    legend_elems = [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor=hex_to_rgba(label_color_hex.get(lbl, "#ff00ff")),
-            markeredgecolor="k",
-            label=lbl,
-            markersize=8,
-        )
-        for lbl in legend_labels
-    ]
-    ax.legend(handles=legend_elems, loc="upper right", frameon=True)
-
-    day_str = pd.to_datetime(row["day"]).strftime("%Y-%m-%d")
-    ax.set_title(f"cam {row['cam']} - {day_str}")
-    ax.axis("off")
-
-    if show:
-        plt.tight_layout()
-        plt.show()
-
-    return fig, ax
 
 
 def parse_background_image_fname(fname: str | Path, prefix: str = "background_"):
@@ -989,14 +891,21 @@ def process_timestamp_chunk(
     starttime = time.time()
 
     if not datafiles:
-        print(f"[SKIP] No datafiles for {timestamp_start}, hive {hive}")
-        return None
+        error_msg = f"[ERROR] No datafiles for {timestamp_start}, hive {hive}"
+        print(error_msg)
+        raise ValueError(error_msg)
 
-    df = pd.concat(pd.read_parquet(f) for f in datafiles)
+    df = pd.concat((pd.read_parquet(f) for f in datafiles), ignore_index=True)
+
+    # Handle case where all files are empty (no detections during this period)
+    if df.empty or len(df) == 0:
+        error_msg = f"[ERROR] No data in files for {timestamp_start}, hive {hive}"
+        print(error_msg)
+        raise ValueError(error_msg)
 
     # Transform coordinates using rotation configuration
-    # Detection pipeline outputs (x_rot, y_rot) in rotated image coords (origin top-left)
-    # We need coordinates with origin at bottom-left to match calibration coordinate system
+    # Detection pipeline outputs (x_rot, y_rot) in rotated image coords
+    # Transform to original image coordinates (top-left origin)
     if not df.empty:
         from . import get_config
         from .rotation import get_rotation_config

@@ -146,23 +146,32 @@ def corner_points_from_annotations(
     if cfg is None:
         cfg = get_config()
 
-    SCALE_FACTOR = _get_cfg_param(cfg, "SCALE_FACTOR", 1.0)
+    SCALE_FACTOR = _get_cfg_param(cfg, "SCALE_FACTOR", 2.0)
     XPIXELS = _get_cfg_param(cfg, "xpixels")
     YPIXELS = _get_cfg_param(cfg, "ypixels")
     hive_cam_map = _get_cfg_param(cfg, "hive_cam_map")
     annot_stitched = getattr(cfg, "annot_stitched", True)  # if annotations are on stitched images
 
     # Frame index per camera
-    cam_frames = (
-        cam_timestamps
-        .sort_values(["camera", "timestamp"])
-        .assign(frame=lambda d: d.groupby("camera").cumcount())
-        .rename(columns={"camera": "cam"})
-        [["cam", "frame", "timestamp"]]
-    )
+    # Create separate frame indices for each camera to handle different image counts
+    cam_frames_list = []
+    for cam in cam_timestamps["camera"].unique():
+        cam_data = (
+            cam_timestamps[cam_timestamps["camera"] == cam]
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+            .assign(frame=lambda d: d.index, cam=cam)
+            [["cam", "frame", "timestamp"]]
+        )
+        cam_frames_list.append(cam_data)
+
+    cam_frames = pd.concat(cam_frames_list, ignore_index=True)
 
     records = []
     xmlfiles = list(xmlfiles)
+
+    # Get max frame count per camera for validation
+    cam_max_frames = cam_frames.groupby("cam")["frame"].max().to_dict()
 
     for i, xdf in enumerate(xml_dfs):
         hive = infer_hive_from_path(xmlfiles[i]) if i < len(xmlfiles) else None
@@ -190,30 +199,31 @@ def corner_points_from_annotations(
             if annot_stitched and x_right > (XPIXELS / 2):
                 x_right = x_right - XPIXELS
 
-            # Convert to bottom-left origin coordinate system for calibration
-            # Annotations are in top-left origin, calibration needs bottom-left origin
-            # This ensures consistency with trajectory processing
-            y_left = YPIXELS - y_left
-            y_right = YPIXELS - y_right
+            # Corner points are kept in top-left origin (image convention)
+            # to match trajectory coordinates and all other pixel data
 
-            records.append(
-                {
-                    "hive": hive,
-                    "frame": frame,
-                    "cam": left_cam,
-                    "corner_x": float(x_left),
-                    "corner_y": float(y_left),
-                }
-            )
-            records.append(
-                {
-                    "hive": hive,
-                    "frame": frame,
-                    "cam": right_cam,
-                    "corner_x": float(x_right),
-                    "corner_y": float(y_right),
-                }
-            )
+            # Only add records for cameras that have this frame
+            if left_cam in cam_max_frames and frame <= cam_max_frames[left_cam]:
+                records.append(
+                    {
+                        "hive": hive,
+                        "frame": frame,
+                        "cam": left_cam,
+                        "corner_x": float(x_left),
+                        "corner_y": float(y_left),
+                    }
+                )
+
+            if right_cam in cam_max_frames and frame <= cam_max_frames[right_cam]:
+                records.append(
+                    {
+                        "hive": hive,
+                        "frame": frame,
+                        "cam": right_cam,
+                        "corner_x": float(x_right),
+                        "corner_y": float(y_right),
+                    }
+                )
 
     points_by_frame = pd.DataFrame.from_records(records)
     if points_by_frame.empty:
@@ -224,12 +234,31 @@ def corner_points_from_annotations(
 
     merged = (
         points_by_frame
-        .merge(cam_frames, on=["cam", "frame"], how="inner")
-        .sort_values(["hive", "cam", "timestamp"])
-        [["hive", "cam", "timestamp", "corner_x", "corner_y"]]
+        .merge(cam_frames, on=["cam", "frame"], how="left")
+        .sort_values(["hive", "cam", "frame"])
+        [["hive", "cam", "frame", "timestamp", "corner_x", "corner_y"]]
         .reset_index(drop=True)
     )
+
+    # Check for missing timestamps (annotations on frames without corresponding images)
+    missing_ts = merged["timestamp"].isna()
+    if missing_ts.any():
+        missing_details = merged[missing_ts][["hive", "cam", "frame"]].drop_duplicates()
+        print(f"WARNING: {missing_ts.sum()} annotations could not be matched to image timestamps:")
+        for _, row in missing_details.iterrows():
+            print(f"  Hive {row['hive']}, cam-{row['cam']}, frame {row['frame']}")
+        print("  This typically means annotations reference frames beyond available images for that camera.")
+        # Drop rows with missing timestamps
+        merged = merged[~missing_ts].copy()
+
+    if merged.empty:
+        print("ERROR: No annotations could be matched to image timestamps.")
+        return pd.DataFrame(
+            columns=["hive", "cam", "timestamp", "corner_x", "corner_y", "midday_utc"]
+        )
+
     merged["midday_utc"] = merged["timestamp"].dt.floor("D") + pd.Timedelta(hours=12)
+    merged = merged[["hive", "cam", "timestamp", "corner_x", "corner_y", "midday_utc"]]
     return merged
 
 

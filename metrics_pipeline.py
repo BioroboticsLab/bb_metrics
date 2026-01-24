@@ -492,3 +492,50 @@ def estimate_death_days(
             )
 
     return pd.DataFrame(results)
+
+def create_birth_df(df_tags):
+    birth_records = []
+
+    for _, row in df_tags.iterrows():
+        hive = row['Hive']
+        birthdate = row['Date'].date()  # Convert to date
+        tag_ranges = []
+
+        # Process first tag range
+        if not pd.isnull(row['tag_start']) and not pd.isnull(row['tag_end']):
+            tag_start = int(row['tag_start'])
+            tag_end = int(row['tag_end'])
+            tag_ranges.append(range(tag_start, tag_end + 1))  # Inclusive range
+
+        # Process second tag range if present
+        if not pd.isnull(row['tag_start2']) and not pd.isnull(row['tag_end2']):
+            tag_start2 = int(row['tag_start2'])
+            tag_end2 = int(row['tag_end2'])
+            tag_ranges.append(range(tag_start2, tag_end2 + 1))  # Inclusive range
+
+        # Combine all bee_ids
+        for tag_range in tag_ranges:
+            for bee_id in tag_range:
+                birth_records.append({
+                    'bee_id': float(bee_id),
+                    'birthdate': birthdate,
+                    'hive': hive
+                })
+
+    df_birth = pd.DataFrame(birth_records)
+    return df_birth
+
+def create_death_df(df_beedeath):
+    # Drop rows where 'estimated_death_daynum' is NaN
+    df_beedeath_clean = df_beedeath.dropna(subset=['estimated_death_daynum']).copy()
+
+    # Convert 'estimated_death_daynum' to integer
+    df_beedeath_clean['estimated_death_daynum'] = df_beedeath_clean['estimated_death_daynum'].astype(int)
+
+    # Map day numbers to dates using bd.number_to_day
+    df_beedeath_clean['deathdate'] = df_beedeath_clean['estimated_death_daynum'].apply(lambda x: bd.number_to_day.get(x))
+
+    # Keep only relevant columns
+    df_death = df_beedeath_clean[['hive','bee_id', 'deathdate']]
+
+    return df_death

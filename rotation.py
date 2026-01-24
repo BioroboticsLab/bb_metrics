@@ -11,9 +11,12 @@ Rotation types:
 - '180': 180° rotation (flip)
 
 The detection pipeline outputs coordinates in the rotated image space.
-This module handles:
-1. Reversing the rotation to get original image coordinates
-2. Converting to bottom-left origin (y-up) for calibration consistency
+This module handles reversing the rotation to get original image coordinates.
+
+All coordinates remain in top-left origin (standard image convention):
+- (0, 0) at top-left corner
+- x increases rightward
+- y increases downward
 """
 
 import numpy as np
@@ -112,6 +115,11 @@ class RotationConfig:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Convert from top-left origin to bottom-left origin.
+
+        NOTE: This function is NOT used in the main pipeline. All coordinates
+        are kept in top-left origin (standard image convention) for consistency.
+        Retained for potential special use cases.
+
         Input: (x, y) with origin at top-left, y increases downward
         Output: (x, y) with origin at bottom-left, y increases upward
 
@@ -141,9 +149,10 @@ class RotationConfig:
         Full transformation pipeline for detection coordinates.
 
         Input: coordinates from detection pipeline (rotated image, top-left origin)
-        Output: coordinates for calibration (original image, bottom-left origin)
+        Output: coordinates in original image space (top-left origin)
 
         This is the main function to use when processing trajectory data.
+        Coordinates remain in top-left origin (standard image convention).
 
         Parameters
         ----------
@@ -154,18 +163,15 @@ class RotationConfig:
 
         Returns
         -------
-        x_calib : np.ndarray
-            X coordinates in calibration system
-        y_calib : np.ndarray
-            Y coordinates in calibration system
+        x_pixels : np.ndarray
+            X coordinates in original image (top-left origin)
+        y_pixels : np.ndarray
+            Y coordinates in original image (top-left origin)
         """
-        # Step 1: Reverse the rotation
+        # Reverse the rotation to get original image coordinates
         x_orig, y_orig = self.reverse_rotation_pixels(x_rot, y_rot)
 
-        # Step 2: Convert to bottom-left origin
-        x_calib, y_calib = self.to_bottom_left_origin(x_orig, y_orig)
-
-        return x_calib, y_calib
+        return x_orig, y_orig
 
     def transform_orientation(self, orientation_rot: np.ndarray) -> np.ndarray:
         """
@@ -265,19 +271,22 @@ class RotationConfig:
         else:
             raise ValueError(f"Unknown rotation type: {self.rotation}")
 
-    def get_calibration_transform_matrix(self) -> np.ndarray:
+    def get_calibration_transform_matrix(self) -> Tuple[bool, int]:
         """
         Get the transformation needed for calibration corner points.
+
+        NOTE: This function is deprecated. All coordinates now use top-left
+        origin (standard image convention), so no y-flip is needed.
 
         Returns
         -------
         needs_y_flip : bool
-            Whether y coordinates need to be flipped for calibration
+            Whether y coordinates need to be flipped (always False now)
         height_for_flip : int
-            The height value to use for y-flipping (original_height)
+            The height value (original_height, unused)
         """
-        # Calibration always needs bottom-left origin
-        return True, self.original_height
+        # All coordinates use top-left origin - no flip needed
+        return False, self.original_height
 
 
 def get_rotation_config(cfg) -> RotationConfig:
@@ -298,9 +307,17 @@ def get_rotation_config(cfg) -> RotationConfig:
     rotation = getattr(cfg, 'camera_rotation', 'cw90')
 
     # Get image dimensions
-    # Note: ypixels and xpixels in config refer to ORIGINAL (pre-rotation) dimensions
-    original_height = cfg.ypixels
-    original_width = cfg.xpixels
+    # Note: ypixels and xpixels in config refer to ROTATED (analysis frame) dimensions
+    # For CW90/CCW90 rotations, original dimensions are swapped
+    if rotation in ('cw90', 'ccw90'):
+        # cfg.xpixels and cfg.ypixels are in rotated frame
+        # Original (pre-rotation) dimensions are swapped
+        original_width = cfg.ypixels
+        original_height = cfg.xpixels
+    else:
+        # For 'none' or '180', dimensions don't swap
+        original_width = cfg.xpixels
+        original_height = cfg.ypixels
 
     return RotationConfig(
         rotation=rotation,

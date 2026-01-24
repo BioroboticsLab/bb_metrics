@@ -134,13 +134,57 @@ def process_datedir(
         return "no_files"
 
     df = pd.concat([pd.read_parquet(f) for f in files])
+    if len(df)==0:
+        # uncommon but possible case - video files but no detections for a day
+        # create and save an empty dateframe
+        pd.DataFrame(columns=["timestamp",
+            "video_start_timestamp",
+            "x_pixels",
+            "y_pixels",
+            "orientation",
+            "detection_type",
+            "cam_id",
+            "bee_id",
+            "bee_id_confidence",
+            "localizerSaliency"]).to_parquet(outfile)
+        return 'no_data'
+
     df = get_df_feedercam(df)
+
     # drop bad cam_id rows (non-string)
     df = df[df["cam_id"].apply(lambda x: isinstance(x, str))].reset_index(drop=True)
 
     outfile.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(outfile)
     return "ok"
+
+
+def _process_daily_file_worker(args):
+    """
+    Worker function for parallel processing of daily files.
+    Must be at module level to be picklable by multiprocessing.
+    """
+    file, avg_dir, recalc, localizer_threshold, bee_id_confidence_threshold = args
+    outfile = avg_dir / Path(file).name
+
+    try:
+        if outfile.is_file() and not recalc:
+            pd.read_parquet(outfile)
+            return ("skip", str(file))
+    except Exception:
+        pass
+
+    try:
+        df = pd.read_parquet(file)
+        avg = get_average_counts_daily(
+            df,
+            localizer_threshold=localizer_threshold,
+            bee_id_confidence_threshold=bee_id_confidence_threshold,
+        )
+        avg.to_parquet(outfile)
+        return ("ok", str(file))
+    except Exception as e:
+        return ("error", f"{file}: {e}")
 
 
 def process_daily_files(
@@ -164,27 +208,12 @@ def process_daily_files(
     avg_dir = Path(avg_dir)
     avg_dir.mkdir(parents=True, exist_ok=True)
 
-    def _worker(file):
-        outfile = avg_dir / Path(file).name
-        try:
-            if outfile.is_file() and not recalc:
-                pd.read_parquet(outfile)
-                return ("skip", str(file))
-        except Exception:
-            pass
-
-        try:
-            df = pd.read_parquet(file)
-            avg = get_average_counts_daily(
-                df,
-                localizer_threshold=localizer_threshold,
-                bee_id_confidence_threshold=bee_id_confidence_threshold,
-            )
-            avg.to_parquet(outfile)
-            return ("ok", str(file))
-        except Exception as e:
-            return ("error", f"{file}: {e}")
+    # Prepare arguments for worker function
+    worker_args = [
+        (file, avg_dir, recalc, localizer_threshold, bee_id_confidence_threshold)
+        for file in daily_files
+    ]
 
     with Pool(processes=processes) as pool:
-        results = pool.map(_worker, daily_files)
+        results = pool.map(_process_daily_file_worker, worker_args)
     return results
