@@ -1,6 +1,13 @@
 """
 Calibration helpers for corner points and pixel-to-cm factors.
 
+CVAT annotations are used ONLY for spatial calibration:
+- Corner point extraction (frame reference points for hive coordinate origin)
+- Pixel-to-cm conversion (using known-length calibration boxes)
+
+Note: Comb substrate annotations (empty cells, brood, honey, etc.) come from
+a separate specialized annotation tool, not CVAT.
+
 These functions are designed to be called from a notebook so you can
 visualize and validate results. They take a config object (or use the
 active bb_metrics config) for dataset-specific parameters.

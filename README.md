@@ -50,6 +50,35 @@ The data processing workflow consists of three main steps:
 - Prepare treatment schedules
 - Set up metadata for the experiment
 
+### Step 1: Comb Annotations (Optional)
+
+**Notebook**: `1 - Comb images and annotations.ipynb`
+
+Creates spatially-resolved comb substrate maps from external annotation tool output:
+
+```python
+from bb_metrics import datafunctions as dfunc
+
+# Load annotation images from specialized comb annotation tool
+# Each annotation image has color-coded regions for substrate types
+annot_img = load_annotation_image(annot_path)
+
+# Convert to label grids mapping pixel coordinates to substrate labels
+label_grid = dfunc.annotation_image_to_grid(annot_img, label_colors)
+
+# Save grids as .npz files for later lookup
+np.savez(grid_path, label_grid=label_grid, ds=downsample_factor,
+         raw_w=width, raw_h=height, label_order=label_order)
+```
+
+**What it does:**
+- Loads annotation images from a specialized comb substrate annotation tool (separate from CVAT)
+- Creates downsampled grids mapping pixel coordinates to substrate labels
+- Supports labels: `empty_cell`, `open_brood`, `capped_brood`, `capped_honey`, `other`
+- Enables per-detection substrate classification in metrics calculation
+
+**Outputs**: `grid_<cam>_<timestamp>.npz` files per camera per annotation timepoint
+
 ### Step 1: Process Trajectories
 
 **Notebook**: `1 - Process trajectories.ipynb`
@@ -226,7 +255,7 @@ df_feedervisits = pd.read_parquet(cfg.metrics_dir / 'df_feedervisits.parquet')
 
 ### Utility Modules
 
-- **`datafunctions.py`** - Data loading, weather data, date parsing utilities
+- **`datafunctions.py`** - Data loading, weather data, date parsing utilities, `GridLookup` class for comb substrate queries
 - **`displayfunctions.py`** - Standardized plotting functions for metrics and time series
 
 ### Configuration
@@ -304,7 +333,7 @@ Parquet files with columns:
 Parquet files with one row per bee per time segment:
 - Bee info: `hive`, `bee_id`, `timestamp_start`, `timestamp_end`, `num_detections`
 - Movement: `dispersion`, `speed_median`, `speed_iqr`, `num_trips`
-- Spatial: `fraction_squares_visited`, `exit_distance_median`, `topfeeder_distance_median`
+- Spatial: `fraction_squares_visited`, `exit_distance_median`
 - Comb usage: `frame_0_hist` through `frame_3_hist`, centermedian values
 - Activity: `inplace_events`, `burst_events`, `large_turn_events`
 - Social: `numbees0`, `numbees1`, `numbees2`
