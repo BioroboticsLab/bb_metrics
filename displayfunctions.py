@@ -31,15 +31,15 @@ def rgba_cmap(histdata,normvalue=-1,color=[0,0,0]):
 import numpy as np
 
 def setimageorientation(f, ax, setf=True):
-    f.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=None, hspace=None)            
-    
+    f.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=None, hspace=None)
+
     # Check if ax is a single axis or an array of axes
     if not isinstance(ax, np.ndarray):
         ax = np.array([ax])
     # If ax is an array, iterate through each axis
     for a in ax.flat:  # .flat flattens the axes array, works for 2D/1D axes arrays
         a.set_xlim([0, 2 * bd.xpixels])
-        a.set_ylim([0, bd.ypixels])
+        a.set_ylim([bd.ypixels, 0])  # y=0 at TOP (top-left origin, matches data convention)
 
 def createnewimage(size=10):
     f, ax = plt.subplots(1,1)
@@ -105,14 +105,6 @@ def showhist(hist,ax=[],color=[0,0,0],alpha=1,normvalue=-1):
 def showmonthday(timestamp):
     return str(timestamp.month).zfill(2)+'-'+str(timestamp.day).zfill(2)
         
-def showframe(cam_ids,ax=[],color=snscolors[1]):  # cam_ids should either be [0,1], or [2,3], for the two different hives
-    if ax==[]:
-        f, ax = createnewimage()        
-    for v in [0, bd.xpixels, 2*bd.xpixels]:
-        ax.axvline(bd.xpixels,c=color,zorder=10)
-    for i,cam_id in enumerate(cam_ids):
-        ax.axhline(bd.divs_middle[cam_id],xmin=i*0.5,xmax=0.5+i*0.5,c=color)
-    return ax
 
 def get_hive_cam0(camera):
     import numbers
@@ -257,11 +249,12 @@ def shade_treatments(ax, intervals_df, color='red', alpha=0.3):
     return ax
 
 
-def common_plot_formatting(ax_list, mintime, maxtime, tz='Europe/Berlin'):
+def common_plot_formatting(ax_list, mintime, maxtime, tz='Europe/Berlin', skip=1):
     """
     Apply shared x-axis locators/formatting across a list of axes.
     - Major ticks: daily grid lines
     - Minor ticks: every 6 h, labels like '12:00'
+    - skip: annotate every Nth day at the top (default=1 for every day, 2 for every other day)
     """
     daily_locator = mdates.DayLocator(tz=tz)
     day_fmt = mdates.DateFormatter('%m-%d', tz=tz)
@@ -280,10 +273,11 @@ def common_plot_formatting(ax_list, mintime, maxtime, tz='Europe/Berlin'):
         if i == 0:
             start_day = pd.Timestamp(mintime.date() + pd.Timedelta(days=1), tz=tz)
             end_day = pd.Timestamp(maxtime.date(), tz=tz)
-            for day in pd.date_range(start_day, end_day, freq='D', tz=tz):
-                noon = day + pd.Timedelta(hours=14)
-                a.annotate(day.strftime('%m-%d'), xy=(noon, 1.02), xycoords=('data', 'axes fraction'),
-                           ha='center', va='bottom', fontsize=12)
+            for idx, day in enumerate(pd.date_range(start_day, end_day, freq='D', tz=tz)):
+                if idx % skip == 0:
+                    noon = day + pd.Timedelta(hours=14)
+                    a.annotate(day.strftime('%m-%d'), xy=(noon, 1.02), xycoords=('data', 'axes fraction'),
+                               ha='center', va='bottom', fontsize=12)
 
     ax_list[-1].set_xlim(mintime, maxtime)
     for a in ax_list:
@@ -291,10 +285,11 @@ def common_plot_formatting(ax_list, mintime, maxtime, tz='Europe/Berlin'):
         a.tick_params(labelsize=12)
 
 
+
 def plot_temp_and_precip(a, hourdata):
     """Plot temp on left y and precip on right y."""
     a.plot(hourdata.index, hourdata['temp'], marker='.', color='grey')
-    a.set_ylabel('Outside\\nTemperature (°C)', fontsize=14)
+    a.set_ylabel('Outside\nTemperature (°C)', fontsize=14)
     ax2 = a.twinx()
     ax2.bar(hourdata.index, hourdata['prcp'], width=0.05, color='tab:blue', alpha=0.6, label='Precipitation (mm)')
     ax2.set_ylabel('Precipitation (mm)', color='tab:blue', fontsize=14)

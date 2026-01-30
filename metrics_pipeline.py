@@ -533,7 +533,8 @@ def create_death_df(df_beedeath):
     df_beedeath_clean['estimated_death_daynum'] = df_beedeath_clean['estimated_death_daynum'].astype(int)
 
     # Map day numbers to dates using bd.number_to_day
-    df_beedeath_clean['deathdate'] = df_beedeath_clean['estimated_death_daynum'].apply(lambda x: bd.number_to_day.get(x))
+    cfg = get_config()
+    df_beedeath_clean['deathdate'] = df_beedeath_clean['estimated_death_daynum'].apply(lambda x: cfg.number_to_day.get(x))
 
     # Keep only relevant columns
     df_death = df_beedeath_clean[['hive','bee_id', 'deathdate']]
