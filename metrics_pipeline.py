@@ -16,6 +16,7 @@ import pandas as pd
 from . import get_config
 from . import datafunctions as dfunc
 from . import metricsfunctions as mfunc
+from .uid import assign_uid, build_reuse_intervals
 
 
 def build_pairs_from_traj(all_datafiles: Iterable[Path], cam_hive_map: dict) -> Tuple[list, list]:
@@ -172,6 +173,7 @@ def build_day_data_matrix(
     df_metrics: pd.DataFrame,
     day_to_number: dict,
     *,
+    dftags: Optional[pd.DataFrame] = None,
     tz: str = "Europe/Berlin",
     daysine_peaktime: Optional[float] = None,
     sumqs: Optional[List[str]] = None,
@@ -189,6 +191,11 @@ def build_day_data_matrix(
     df_metrics["day"] = df_metrics["timestamp_start_cest"].dt.date
     df_metrics["daynum"] = df_metrics["day"].map(day_to_number)
 
+    # Assign uid if tag introduction data is available
+    has_uid = dftags is not None and not dftags.empty
+    if has_uid:
+        df_metrics["uid"] = assign_uid(df_metrics, dftags).values
+
     def weighted_mean(values, weights):
         total_weight = np.nansum(weights)
         if total_weight == 0:
@@ -205,15 +212,20 @@ def build_day_data_matrix(
 
     if weightedmeanqs is None:
         numeric_cols = df_metrics.select_dtypes(include=[np.number]).columns.tolist()
-        exclude = set(sumqs + ["bee_id", "daynum", "Hour", "daysinevals"])
+        exclude = set(sumqs + ["bee_id", "uid", "daynum", "Hour", "daysinevals"])
         weightedmeanqs = [col for col in numeric_cols if col not in exclude]
 
-    grouped = df_metrics.groupby(["hive", "bee_id", "daynum", "day"])
+    group_keys = ["hive", "bee_id", "uid", "daynum", "day"] if has_uid else ["hive", "bee_id", "daynum", "day"]
+    grouped = df_metrics.groupby(group_keys)
 
     results = []
     for name, group in grouped:
-        hive, bee_id, day_num, day = name
-        result = {"hive": hive, "bee_id": bee_id, "daynum": day_num, "day": day}
+        if has_uid:
+            hive, bee_id, uid, day_num, day = name
+            result = {"hive": hive, "bee_id": bee_id, "uid": uid, "daynum": day_num, "day": day}
+        else:
+            hive, bee_id, day_num, day = name
+            result = {"hive": hive, "bee_id": bee_id, "daynum": day_num, "day": day}
 
         for q in sumqs:
             result[q] = group[q].sum()
@@ -230,13 +242,16 @@ def build_day_data_matrix(
 
         results.append(result)
 
-    return pd.DataFrame(
-        results,
-        columns=["hive", "bee_id", "daynum", "day"] + sumqs + weightedmeanqs + ["speed_circadian_coeff"],
-    )
+    out_cols = group_keys + sumqs + weightedmeanqs + ["speed_circadian_coeff"]
+    return pd.DataFrame(results, columns=out_cols)
 
 
-def _build_daily_visit_summary(df_visits: pd.DataFrame, day_to_number: dict, visit_label: str) -> pd.DataFrame:
+def _build_daily_visit_summary(
+    df_visits: pd.DataFrame,
+    day_to_number: dict,
+    visit_label: str,
+    dftags: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     if df_visits.empty:
         return pd.DataFrame(columns=["hive", "bee_id", "daynum", "day"])
 
@@ -246,8 +261,14 @@ def _build_daily_visit_summary(df_visits: pd.DataFrame, day_to_number: dict, vis
     df_visits = df_visits[df_visits["daynum"] >= 0]
     df_visits["hive"] = df_visits["cam_id"].apply(lambda x: x[-1])
 
+    has_uid = dftags is not None and not dftags.empty
+    if has_uid:
+        df_visits["uid"] = assign_uid(df_visits, dftags).values
+
+    group_keys = ["hive", "bee_id", "uid", "daynum", "day"] if has_uid else ["hive", "bee_id", "daynum", "day"]
+
     return (
-        df_visits.groupby(["hive", "bee_id", "daynum", "day"], as_index=False)
+        df_visits.groupby(group_keys, as_index=False)
         .agg(
             **{
                 f"num_{visit_label}_visits": ("visit_id", "count"),
@@ -262,15 +283,22 @@ def merge_daily_visit_metrics(
     df_feedervisits: pd.DataFrame,
     df_exitvisits: pd.DataFrame,
     day_to_number: dict,
+    dftags: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    df_feeder_daily = _build_daily_visit_summary(df_feedervisits, day_to_number, "feeder")
-    df_exit_daily = _build_daily_visit_summary(df_exitvisits, day_to_number, "exit")
+    df_feeder_daily = _build_daily_visit_summary(df_feedervisits, day_to_number, "feeder", dftags=dftags)
+    df_exit_daily = _build_daily_visit_summary(df_exitvisits, day_to_number, "exit", dftags=dftags)
 
-    dfday = pd.merge(dfday, df_feeder_daily, on=["hive", "bee_id", "daynum", "day"], how="left")
+    has_uid = "uid" in dfday.columns and "uid" in df_feeder_daily.columns
+    merge_keys = ["hive", "bee_id", "uid", "daynum", "day"] if has_uid else ["hive", "bee_id", "daynum", "day"]
+
+    dfday = pd.merge(dfday, df_feeder_daily, on=merge_keys, how="left")
     dfday["num_feeder_visits"] = dfday["num_feeder_visits"].fillna(0)
     dfday["feeder_visit_duration_mean"] = dfday["feeder_visit_duration_mean"].fillna(0)
 
-    dfday = pd.merge(dfday, df_exit_daily, on=["hive", "bee_id", "daynum", "day"], how="left")
+    has_uid_exit = "uid" in dfday.columns and "uid" in df_exit_daily.columns
+    merge_keys_exit = ["hive", "bee_id", "uid", "daynum", "day"] if has_uid_exit else ["hive", "bee_id", "daynum", "day"]
+
+    dfday = pd.merge(dfday, df_exit_daily, on=merge_keys_exit, how="left")
     dfday["num_exit_visits"] = dfday["num_exit_visits"].fillna(0)
     dfday["exit_visit_duration_mean"] = dfday["exit_visit_duration_mean"].fillna(0)
 
@@ -451,16 +479,24 @@ def estimate_death_days(
         cfg = get_config()
         hives = cfg.hives
 
+    has_uid = "uid" in dfday.columns
+
     results = []
     for hive in hives:
         print(hive)
         dfsel = dfday[dfday["hive"] == hive]
-        ids = dfsel["bee_id"].unique()
-        for i, bee_id in enumerate(ids):
+
+        if has_uid:
+            id_col = "uid"
+        else:
+            id_col = "bee_id"
+
+        ids = dfsel[id_col].unique()
+        for i, current_id in enumerate(ids):
             if i % 100 == 0:
                 print(i, len(ids))
 
-            bee_data = dfsel[dfsel["bee_id"] == bee_id].sort_values(by="daynum").copy()
+            bee_data = dfsel[dfsel[id_col] == current_id].sort_values(by="daynum").copy()
             if bee_data.empty:
                 continue
             hive_mode = bee_data["hive"].mode().values[0]
@@ -483,13 +519,14 @@ def estimate_death_days(
             else:
                 estimated_death_daynum = bee_data.loc[death_day_index, "daynum"]
 
-            results.append(
-                {
-                    "bee_id": bee_id,
-                    "hive": hive,
-                    "estimated_death_daynum": estimated_death_daynum,
-                }
-            )
+            row = {
+                "bee_id": bee_data["bee_id"].mode().values[0] if has_uid else current_id,
+                "hive": hive,
+                "estimated_death_daynum": estimated_death_daynum,
+            }
+            if has_uid:
+                row["uid"] = current_id
+            results.append(row)
 
     return pd.DataFrame(results)
 
@@ -523,6 +560,24 @@ def create_birth_df(df_tags):
                 })
 
     df_birth = pd.DataFrame(birth_records)
+
+    # Assign uid to handle reused tags
+    if not df_birth.empty:
+        intervals = build_reuse_intervals(df_tags)
+        if not intervals.empty:
+            # Match each birth record to its generation via (hive, bee_id, intro_date)
+            intervals_match = intervals.copy()
+            intervals_match["birthdate"] = intervals_match["intro_date"].dt.date
+            df_birth = df_birth.merge(
+                intervals_match[["hive", "bee_id", "birthdate", "uid"]],
+                on=["hive", "bee_id", "birthdate"],
+                how="left",
+            )
+            # Fill any unmatched with bee_id
+            df_birth["uid"] = df_birth["uid"].fillna(df_birth["bee_id"]).astype(int)
+        else:
+            df_birth["uid"] = df_birth["bee_id"].astype(int)
+
     return df_birth
 
 def create_death_df(df_beedeath):
@@ -537,6 +592,9 @@ def create_death_df(df_beedeath):
     df_beedeath_clean['deathdate'] = df_beedeath_clean['estimated_death_daynum'].apply(lambda x: cfg.number_to_day.get(x))
 
     # Keep only relevant columns
-    df_death = df_beedeath_clean[['hive','bee_id', 'deathdate']]
+    cols = ['hive', 'bee_id', 'deathdate']
+    if 'uid' in df_beedeath_clean.columns:
+        cols = ['hive', 'bee_id', 'uid', 'deathdate']
+    df_death = df_beedeath_clean[cols]
 
     return df_death

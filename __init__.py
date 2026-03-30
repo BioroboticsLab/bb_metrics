@@ -24,3 +24,7 @@ def get_config() -> Any:
     if _CFG is None:
         raise RuntimeError("bb_metrics config not set. Call bb_metrics.set_config(cfg) first.")
     return _CFG
+
+
+# UID helpers for reused tag IDs
+from .uid import assign_uid, build_reuse_intervals  # noqa: E402
