@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bb_metrics"
+version = "0.1.0"
+description = "Beesbook metrics and analysis tools"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "opencv-python",
+    "dill",
+    "bb_binary @ git+https://github.com/BioroboticsLab/bb_binary",
+    "bb_utils @ git+https://github.com/BioroboticsLab/bb_utils",
+]
+
+[project.optional-dependencies]
+weather = ["meteostat"]
+
+[tool.setuptools]
+packages = ["bb_metrics", "bb_metrics.config"]
+package-dir = {"bb_metrics" = ".", "bb_metrics.config" = "config"}
+
+[tool.setuptools.package-data]
+"bb_metrics.config" = ["*.json"]
