@@ -4,6 +4,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import cv2
+from .datafunctions import get_hive_cam0
 
 snscolors=sns.color_palette()
 snscolors = np.concatenate((snscolors,snscolors))
@@ -106,20 +107,7 @@ def showmonthday(timestamp):
     return str(timestamp.month).zfill(2)+'-'+str(timestamp.day).zfill(2)
         
 
-def get_hive_cam0(camera):
-    import numbers
-    # If camera is a single integer (int or int-like, such as int64), convert it to a list
-    if isinstance(camera, numbers.Integral):
-        camera = [camera]
-    
-    # Check for any 0 or 1 in the camera list
-    if any(cam in [0, 1] for cam in camera):
-        return 0
-    # Check for any 2 or 3 in the camera list
-    elif any(cam in [2, 3] for cam in camera):
-        return 2
-    else:
-        return None  # Or any other default value
+
 
 def plotbee_xy(
     dfbee, plot_tracklets=False, ax=None, color='k', s=10, alpha=0.7, alpha_untagged=0.7, joined=True, maxxydiff=80, rasterized=False
