@@ -114,6 +114,11 @@ def assign_uid(
     lookup[bee_id_col] = lookup[bee_id_col].astype(int)
     intervals["bee_id"] = intervals["bee_id"].astype(int)
 
+    # Ensure matching datetime resolution for merge_asof
+    common_res = "us"
+    lookup["_date"] = lookup["_date"].astype(f"datetime64[{common_res}]")
+    intervals["intro_date_norm"] = intervals["intro_date_norm"].astype(f"datetime64[{common_res}]")
+
     # Sort both sides for merge_asof
     lookup_sorted = lookup.sort_values("_date")
     intervals_sorted = intervals.sort_values("intro_date_norm")
