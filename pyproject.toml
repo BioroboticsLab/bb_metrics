@@ -16,6 +16,7 @@ dependencies = [
     "seaborn",
     "opencv-python",
     "dill",
+    "h5py",
     "bb_binary @ git+https://github.com/BioroboticsLab/bb_binary",
     "bb_utils @ git+https://github.com/BioroboticsLab/bb_utils",
 ]
