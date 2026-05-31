@@ -59,7 +59,7 @@ def get_valid_tags(dftags: Optional[pd.DataFrame], camdate, hive: str) -> Option
 
     camdate = pd.to_datetime(camdate)
 
-    if not np.issubdtype(dftags["Date"].dtype, np.datetime64):
+    if not pd.api.types.is_datetime64_any_dtype(dftags["Date"]):
         dftags = dftags.copy()
         dftags["Date"] = pd.to_datetime(dftags["Date"], errors="coerce")
 
