@@ -503,7 +503,10 @@ def estimate_death_days(
             bee_data = bee_data[bee_data["hive"] == hive_mode]
 
             full_days = np.arange(bee_data["daynum"].min(), bee_data["daynum"].max() + 1)
-            bee_data = bee_data.set_index("daynum").reindex(full_days, fill_value=0).reset_index()
+            bee_data = bee_data.set_index("daynum").reindex(full_days).reset_index()
+            # Fill only numeric columns with 0 (pandas 3.0's strict str dtype rejects int fill on string columns)
+            numeric_cols = bee_data.select_dtypes(include="number").columns
+            bee_data[numeric_cols] = bee_data[numeric_cols].fillna(0)
 
             num_detect = bee_data["num_detections"].to_numpy()
             num_detect = np.concatenate((num_detect, np.zeros(extra_days_after)))

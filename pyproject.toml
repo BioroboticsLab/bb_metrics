@@ -17,12 +17,11 @@ dependencies = [
     "opencv-python",
     "dill",
     "h5py",
+    "pymc",
+    "meteostat",
     "bb_binary @ git+https://github.com/BioroboticsLab/bb_binary",
     "bb_utils @ git+https://github.com/BioroboticsLab/bb_utils",
 ]
-
-[project.optional-dependencies]
-weather = ["meteostat"]
 
 [tool.setuptools]
 packages = ["bb_metrics", "bb_metrics.config"]
