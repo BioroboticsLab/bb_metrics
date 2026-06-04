@@ -5,6 +5,7 @@ and computing feeder/exit visit tables.
 
 import glob
 import multiprocessing
+import os
 from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
@@ -472,7 +473,18 @@ def estimate_death_days(
     estimator: Optional[LifetimeEstimator] = None,
     extra_days_after: int = 25,
     progress: bool = False,
+    output_path: Optional[Path] = None,
+    recalc: bool = False,
 ) -> pd.DataFrame:
+    """
+    Estimate each bee's death day via a per-bee changepoint MCMC fit.
+
+    If ``output_path`` is given, every bee's result is appended to that CSV as
+    soon as it is computed, so a crash never loses finished bees. Re-running with
+    ``recalc=False`` (the default) resumes: bees already present in the file are
+    skipped. ``recalc=True`` deletes any existing file and starts fresh. When
+    ``output_path`` is None, behavior is unchanged (results are only returned).
+    """
     if estimator is None:
         estimator = LifetimeEstimator()
     if hives is None:
@@ -480,21 +492,53 @@ def estimate_death_days(
         hives = cfg.hives
 
     has_uid = "uid" in dfday.columns
+    id_col = "uid" if has_uid else "bee_id"
+    out_cols = (
+        ["hive", id_col, "bee_id", "estimated_death_daynum"]
+        if has_uid
+        else ["hive", "bee_id", "estimated_death_daynum"]
+    )
+
+    persist = output_path is not None
+    if persist:
+        output_path = Path(output_path)
+        if recalc and output_path.exists():
+            output_path.unlink()  # recalc=True -> true from-scratch run
+
+    # Work-units (hive, id) already on disk, so resume skips them.
+    done_keys = set()
+    if persist and not recalc and output_path.exists():
+        try:
+            prev = pd.read_csv(
+                output_path,
+                usecols=lambda c: c in ("hive", id_col),  # tolerate schema drift
+                on_bad_lines="skip",  # drop a torn final line from a mid-write crash
+            )
+            prev = prev.dropna(subset=["hive", id_col])
+            done_keys = {(str(h), int(v)) for h, v in zip(prev["hive"], prev[id_col])}
+        except Exception:
+            done_keys = set()
+
+    def _append_row(row: dict) -> None:
+        df_row = pd.DataFrame([row]).reindex(columns=out_cols)  # stable column order
+        write_header = not output_path.exists()  # header only on first write
+        with open(output_path, "a", newline="") as f:
+            df_row.to_csv(f, header=write_header, index=False)
+            f.flush()
+            os.fsync(f.fileno())  # commit to disk before the next multi-second fit
 
     results = []
     for hive in hives:
         print(hive)
         dfsel = dfday[dfday["hive"] == hive]
 
-        if has_uid:
-            id_col = "uid"
-        else:
-            id_col = "bee_id"
-
         ids = dfsel[id_col].unique()
         for i, current_id in enumerate(ids):
             if i % 100 == 0:
                 print(i, len(ids))
+
+            if persist and (str(hive), int(current_id)) in done_keys:
+                continue
 
             bee_data = dfsel[dfsel[id_col] == current_id].sort_values(by="daynum").copy()
             if bee_data.empty:
@@ -529,8 +573,17 @@ def estimate_death_days(
             }
             if has_uid:
                 row["uid"] = current_id
-            results.append(row)
 
+            if persist:
+                _append_row(row)
+                done_keys.add((str(hive), int(current_id)))  # guard within-run dups
+            else:
+                results.append(row)
+
+    if persist:
+        if output_path.exists():
+            return pd.read_csv(output_path, on_bad_lines="skip")
+        return pd.DataFrame(columns=out_cols)
     return pd.DataFrame(results)
 
 def create_birth_df(df_tags):
