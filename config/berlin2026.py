@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 year = 2026
-startday = pd.Timestamp(year,6,19)
+startday = pd.Timestamp(year,6,1)
 endday = pd.Timestamp(year,8,19)
 weather_station_id = '10381'  # weather station ID, for use in meteostat:  Dahlem
 

@@ -23,6 +23,9 @@ dependencies = [
     "bb_utils @ git+https://github.com/BioroboticsLab/bb_utils",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [tool.setuptools]
 packages = ["bb_metrics", "bb_metrics.config"]
 package-dir = {"bb_metrics" = ".", "bb_metrics.config" = "config"}

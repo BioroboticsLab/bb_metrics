@@ -55,38 +55,56 @@ def flat_to_hist(flatrow):
     numhistbins = bd_cfg.numxbins*bd_cfg.numybins
     return np.reshape(np.array(flatrow)[-numhistbins:],(bd_cfg.numxbins,bd_cfg.numybins))
 
-def get_weather_data(station_id, start_date, end_date, data_type='hourly'):
+def get_weather_data(station_id, start_date, end_date, data_type='hourly', tz=None):
     """
     Fetches weather data from the given station ID within the provided date range.
-    
+
     Args:
         station_id (str): The ID of the weather station.
-        start_date (datetime)
-        end_date (datetime)
-    
+        start_date (datetime): tz-aware or naive; tz-aware values are converted to
+            the equivalent naive-UTC instant before being passed to meteostat.
+        end_date (datetime): same handling as start_date.
+        data_type (str): 'hourly' or 'daily'.
+        tz (str | None): if None (default), the returned index keeps meteostat's
+            native NAIVE UTC labeling (unchanged legacy behavior). If given (e.g.
+            'Europe/Berlin'), the index is localized to UTC then converted to tz.
+
     Returns:
-        pandas.DataFrame: A dataframe containing the weather data.
+        pandas.DataFrame: weather data indexed by time.
     """
-    # Fetch the weather data between the start_date and end_date
     if data_type not in {'hourly', 'daily'}:
         print('data_type can be hourly or daily')
         return np.nan
 
+    # Accept tz-aware inputs: meteostat expects naive (UTC) datetimes.
+    def _to_naive_utc(t):
+        ts = pd.Timestamp(t)
+        if ts.tz is not None:
+            ts = ts.tz_convert('UTC').tz_localize(None)
+        return ts.to_pydatetime()
+
+    start_date = _to_naive_utc(start_date)
+    end_date = _to_naive_utc(end_date)
+
     # Meteostat API compatibility: class-based (Hourly/Daily) or module-level functions (hourly/daily)
     if _MSHourly is not None and _MSDaily is not None:
         klass = _MSHourly if data_type == 'hourly' else _MSDaily
-        return klass(station_id, start_date, end_date).fetch()
+        data = klass(station_id, start_date, end_date).fetch()
+    elif _meteostat is not None and hasattr(_meteostat, 'Hourly') and hasattr(_meteostat, 'Daily'):
+        klass = _meteostat.Hourly if data_type == 'hourly' else _meteostat.Daily
+        data = klass(station_id, start_date, end_date).fetch()
+    elif _meteostat is not None and hasattr(_meteostat, 'hourly') and hasattr(_meteostat, 'daily'):
+        func = _meteostat.hourly if data_type == 'hourly' else _meteostat.daily
+        out = func(station_id, start_date, end_date)
+        data = out.fetch() if hasattr(out, 'fetch') else out
+    else:
+        raise ImportError("meteostat API not found; expected Hourly/Daily classes or hourly/daily functions")
 
-    if _meteostat is not None:
-        if hasattr(_meteostat, 'Hourly') and hasattr(_meteostat, 'Daily'):
-            klass = _meteostat.Hourly if data_type == 'hourly' else _meteostat.Daily
-            return klass(station_id, start_date, end_date).fetch()
-        if hasattr(_meteostat, 'hourly') and hasattr(_meteostat, 'daily'):
-            func = _meteostat.hourly if data_type == 'hourly' else _meteostat.daily
-            data = func(station_id, start_date, end_date)
-            return data.fetch() if hasattr(data, 'fetch') else data
-
-    raise ImportError("meteostat API not found; expected Hourly/Daily classes or hourly/daily functions")
+    if tz is not None:
+        idx = data.index
+        data = data.copy()
+        data.index = idx.tz_localize('UTC').tz_convert(tz) if idx.tz is None else idx.tz_convert(tz)
+    return data
 
 
 ## the bb_monitory function has input 'numdays', and this should simply get all
