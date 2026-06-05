@@ -600,10 +600,11 @@ def estimate_death_days(
 
             death_day = trace.posterior["switchpoint_died"].mean().item()
             death_day_index = int(np.round(death_day))
-            if death_day_index >= len(bee_data):
-                estimated_death_daynum = bee_data.loc[int(np.round(death_day)) - 1, "daynum"] + 1
-            else:
-                estimated_death_daynum = bee_data.loc[death_day_index, "daynum"]
+            # daynums in bee_data are consecutive (full_days reindex), so the daynum
+            # at any index is first_daynum + index. This stays valid when the
+            # switchpoint lands in the trailing padding (death_day_index can exceed
+            # len(bee_data) by more than 1 — the old loc[idx-1] then raised KeyError).
+            estimated_death_daynum = bee_data["daynum"].iloc[0] + death_day_index
 
             row = {
                 "bee_id": bee_data["bee_id"].mode().values[0] if has_uid else current_id,
