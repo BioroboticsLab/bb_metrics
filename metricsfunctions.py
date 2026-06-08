@@ -303,8 +303,10 @@ def datafile_to_metrics(
 
         # Calculate 'flat' hive coordinates
         # This is done by simply reversing x of the back side camera to "fold it" onto the front one.  Using frame_width_cm to do this
-        cam1 = dfunc.get_hive_cam0(df['cam_id']) + 1
+        cam0 = dfunc.get_hive_cam0(df['cam_id'])
+        cam1 = cam0+1
         df.loc[df['cam_id'] == cam1, 'x_hive_flat'] = cfg.frame_width_cm - df.loc[df['cam_id'] == cam1, 'x_hive']
+        df.loc[df['cam_id'] == cam0, 'x_hive_flat'] = df.loc[df['cam_id'] == cam0, 'x_hive']
 
         # Initialize an empty list to store metrics for all time segments
         metrics_list = []
