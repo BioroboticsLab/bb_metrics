@@ -90,6 +90,7 @@ def process_file(
     dftags: Optional[pd.DataFrame],
     *,
     update: bool = True,
+    reprocess: bool = False,
     confidence_threshold: float = 0.8,
     min_num_obs_in_1hrs_tracked: int = 15,
     max_speed: float = 5.0,
@@ -99,6 +100,10 @@ def process_file(
     """
     Process a single dill file -> parquet.
     Returns (filename, status).
+
+    reprocess=True forces a re-bake even if an up-to-date parquet exists. Use it at
+    season end after entering real corner points / px-cm: the source dill files are
+    unchanged and would otherwise be skipped as "skip_up_to_date".
     """
     cfg = get_config()
     if outdir is None:
@@ -115,7 +120,7 @@ def process_file(
     outfile = outdir / (file.stem + ".parquet")
 
     try:
-        if outfile.exists():
+        if outfile.exists() and not reprocess:
             if not update:
                 return (str(file), "skip_existing")
             if file.stat().st_mtime <= outfile.stat().st_mtime:
@@ -172,6 +177,7 @@ def process_files(
     dftags: Optional[pd.DataFrame],
     *,
     update: bool = True,
+    reprocess: bool = False,
     confidence_threshold: float = 0.8,
     min_num_obs_in_1hrs_tracked: int = 15,
     max_speed: float = 5.0,
@@ -179,7 +185,10 @@ def process_files(
     cam_hive_map: Optional[dict] = None,
     max_workers: int = 4,
 ) -> list:
-    """Process multiple dill files in parallel."""
+    """Process multiple dill files in parallel.
+
+    reprocess=True forces all files to re-bake (see process_file).
+    """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     tasks = []
@@ -194,6 +203,7 @@ def process_files(
                     df_px_per_cm,
                     dftags,
                     update=update,
+                    reprocess=reprocess,
                     confidence_threshold=confidence_threshold,
                     min_num_obs_in_1hrs_tracked=min_num_obs_in_1hrs_tracked,
                     max_speed=max_speed,

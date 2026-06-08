@@ -317,3 +317,78 @@ def pixels_per_cm_from_boxes(
         .reset_index(drop=True)
     )
     return df_px_per_cm
+
+
+def constant_calibration_tables(
+    cfg=None,
+    pixels_per_cm=None,
+    corner_x=350.0,
+    corner_y=5160.0,
+) -> tuple:
+    """
+    Build synthetic (df_cornerpoints, df_px_per_cm) for an in-season "quick view"
+    run that skips notebook 0 (no CVAT corner-point annotations, no per-camera
+    px/cm calibration yet).
+
+    Produces one row per camera in cfg.hive_cam_map, with the SAME column schemas
+    that corner_points_from_annotations / pixels_per_cm_from_boxes emit, so the
+    returned tables are drop-in replacements for df_cornerpoints.csv /
+    df_px_per_cm.csv when running "1 - Process trajectories".
+
+    Args:
+      cfg: bb_metrics config (defaults to the active config).
+      pixels_per_cm: constant px/cm. Scalar applied to all cams, or a {cam: value}
+        dict. Defaults to cfg.pixels_per_cm_approx.
+      corner_x, corner_y: pixel coords of the (assumed) corner point in the
+        rotated/analysis frame. Scalar applied to all cams, or a {cam: value} dict.
+        The defaults (350, 5160) are a rough global estimate of the real Berlin
+        corner so that y_hive lands in the expected mostly-negative range; this
+        makes position metrics (exit distance, frame histograms) approximate but
+        usable until the real per-camera calibration is entered at season end.
+
+    Returns:
+      (df_cornerpoints, df_px_per_cm)
+        df_cornerpoints columns: [hive, cam, timestamp, corner_x, corner_y, midday_utc]
+        df_px_per_cm    columns: [hive, cam, pixels_per_cm]
+    """
+    if cfg is None:
+        cfg = get_config()
+
+    hive_cam_map = _get_cfg_param(cfg, "hive_cam_map")
+    if pixels_per_cm is None:
+        pixels_per_cm = _get_cfg_param(cfg, "pixels_per_cm_approx")
+
+    # A single timestamp at season start (UTC midday) covers every detection: the
+    # converter's merge_asof (backward, then nearest) always resolves to this row.
+    midday = pd.Timestamp(cfg.startday).tz_localize("UTC") + pd.Timedelta(hours=12)
+
+    def _per_cam(value, cam):
+        return float(value[cam]) if isinstance(value, dict) else float(value)
+
+    corner_records, px_records = [], []
+    for hive, cams in hive_cam_map.items():
+        for cam in cams:
+            # cam MUST be int: trajectory cam_id is float after pd.to_numeric, and
+            # int == float matches, but int == "cam-0" would not.
+            cam = int(cam)
+            corner_records.append({
+                "hive": hive,
+                "cam": cam,
+                "timestamp": midday,
+                "corner_x": _per_cam(corner_x, cam),
+                "corner_y": _per_cam(corner_y, cam),
+                "midday_utc": midday,
+            })
+            px_records.append({
+                "hive": hive,
+                "cam": cam,
+                "pixels_per_cm": _per_cam(pixels_per_cm, cam),
+            })
+
+    df_cornerpoints = (
+        pd.DataFrame(corner_records).sort_values(["hive", "cam"]).reset_index(drop=True)
+    )
+    df_px_per_cm = (
+        pd.DataFrame(px_records).sort_values(["hive", "cam"]).reset_index(drop=True)
+    )
+    return df_cornerpoints, df_px_per_cm

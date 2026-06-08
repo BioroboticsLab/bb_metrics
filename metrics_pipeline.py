@@ -130,10 +130,20 @@ def define_feeder_visits(df: pd.DataFrame, visit_gap_seconds: int = 15, confiden
     return visit_df
 
 
-def pair_by_date(datadir: Path, pattern_c: str, pattern_nc: str) -> list:
+def pair_by_date(datadir: Path, pattern_c: str, pattern_nc: str = None) -> list:
+    """Pair CLAHE (-c) and non-CLAHE (-nc) daily files by date.
+
+    If pattern_nc is None (or matches no files) — e.g. 2026, where only CLAHE
+    files are produced — each -c file is paired with itself. process_visit_pairs
+    concats then drops duplicates, so a self-pair yields the single-file content.
+    """
     files_c = sorted(datadir.glob(pattern_c))
-    files_nc = sorted(datadir.glob(pattern_nc))
     c_by_date = {p.stem.split("_", 1)[0]: p for p in files_c}
+
+    files_nc = sorted(datadir.glob(pattern_nc)) if pattern_nc else []
+    if not files_nc:
+        return [[c_by_date[d], c_by_date[d]] for d in sorted(c_by_date.keys())]
+
     nc_by_date = {p.stem.split("_", 1)[0]: p for p in files_nc}
     return [[c_by_date[d], nc_by_date[d]] for d in sorted(c_by_date.keys() & nc_by_date.keys())]
 
