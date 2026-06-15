@@ -34,7 +34,7 @@ cam_hive_map = {0: "A", 1: "A"}
 traj_outdir = Path('/mnt/trove/beesbook_trajectory_data/berlin2019/')
 # Write to a NEW dir during validation so the old metrics2019/ outputs are
 # preserved for the parity check; switch to 'metrics2019/' for the production run.
-metrics_dir = Path('/mnt/trove/beesbook2024/metrics2019_v2/')
+metrics_dir = Path('/mnt/trove/beesbook2019/metrics/')
 
 # Skip the 4-frame frame/exit-distance geometry metrics for 2019 (2-frame hive).
 # Read in get_metrics via getattr(cfg, 'compute_frame_exit_metrics', True), so
