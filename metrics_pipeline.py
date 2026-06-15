@@ -503,6 +503,109 @@ class LifetimeEstimator:
         return model, trace, num_detections
 
 
+class BirthEstimator:
+    """Bayesian changepoint estimator for a bee's emergence (birth) day.
+
+    Mirror of :class:`LifetimeEstimator` for the *rising* edge: it finds the day a
+    bee's daily detections switch from low to high (emergence) rather than high to
+    low (death). It is meant to run on an EARLY WINDOW of each bee's series (the
+    first ``birth_window`` days) so a later death-drop cannot bias the rise — see
+    :func:`estimate_birth_days`. The detection preprocessing and sampler settings
+    match LifetimeEstimator; only the prior and the single-changepoint rate differ.
+    """
+
+    def __init__(
+        self,
+        mu_emergence: int = 0,
+        sigma_emergence: int = 5,
+        birth_window: int = 14,
+        min_detections: int = 1000,
+        max_detections: int = 3000,
+        *,
+        num_tune: int = 1000,
+        num_draws: int = 1000,
+        target_accept: float = 0.9,
+        cores: int = 4,
+        chains: int = 4,
+    ):
+        # Prior on the emergence offset (days from series start to the rise). mu=0
+        # because most bees emerge at/near their first detection; sigma allows slack.
+        self.mu_emergence = mu_emergence
+        self.sigma_emergence = sigma_emergence
+        # Only the first birth_window days of each bee's series are fit (death-drop
+        # exclusion). Tune up if emergence can drift well past first detection.
+        self.birth_window = birth_window
+        self.min_detections = min_detections
+        self.max_detections = max_detections
+        self.num_tune = num_tune
+        self.num_draws = num_draws
+        self.target_accept = target_accept
+        self.cores = cores
+        self.chains = chains
+
+    def fit(
+        self,
+        num_detect,
+        *,
+        num_tune: Optional[int] = None,
+        num_draws: Optional[int] = None,
+        target_accept: Optional[float] = None,
+        progress: bool = False,
+        cores: Optional[int] = None,
+        chains: Optional[int] = None,
+    ):
+        import pymc as pm
+        import scipy.stats
+
+        # Fall back to the instance defaults set in __init__ when not overridden.
+        num_tune = self.num_tune if num_tune is None else num_tune
+        num_draws = self.num_draws if num_draws is None else num_draws
+        target_accept = self.target_accept if target_accept is None else target_accept
+        cores = self.cores if cores is None else cores
+        chains = self.chains if chains is None else chains
+
+        # Same clip-and-normalize preprocessing as LifetimeEstimator.
+        num_detections = num_detect.copy()
+        num_detections -= self.min_detections
+        num_detections = np.clip(num_detections, 0, self.max_detections)
+        num_detections = num_detections / self.max_detections
+
+        observed_data = (num_detections > 0.5).astype(int)
+        days = np.arange(num_detections.shape[0]).astype(np.float64)
+
+        model = pm.Model()
+        with model:
+            p_emergence = scipy.stats.norm.pdf(np.arange(len(days)), self.mu_emergence, self.sigma_emergence)
+            p_emergence /= p_emergence.sum()
+
+            emergence_offset = pm.Categorical("emergence_offset", p=p_emergence)
+            switchpoint_emerged = pm.Deterministic("switchpoint_emerged", emergence_offset)
+
+            probability_higher = pm.Beta("probability_higher", alpha=5, beta=1)
+            probability_lower = pm.Beta("probability_lower", alpha=1, beta=5)
+
+            # Mirror of death: low BEFORE emergence, high AT/AFTER. Unbounded above is
+            # safe because the fit only sees the early window (no death-drop inside).
+            rate = pm.math.switch(
+                days >= switchpoint_emerged,
+                probability_higher,
+                probability_lower,
+            )
+
+            pm.Bernoulli("detections", rate, observed=observed_data)
+
+            trace = pm.sample(
+                tune=num_tune,
+                draws=num_draws,
+                progressbar=progress,
+                target_accept=target_accept,
+                cores=cores,
+                chains=chains,
+            )
+
+        return model, trace, num_detections
+
+
 def estimate_death_days(
     dfday: pd.DataFrame,
     *,
@@ -512,9 +615,15 @@ def estimate_death_days(
     progress: bool = False,
     output_path: Optional[Path] = None,
     recalc: bool = False,
+    birth_days: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Estimate each bee's death day via a per-bee changepoint MCMC fit.
+
+    If ``birth_days`` (the output of :func:`estimate_birth_days`) is given, each
+    bee's alive window starts at its estimated emergence daynum instead of the
+    fixed 0 (first detection). Bees missing from ``birth_days`` fall back to 0, so
+    the default ``birth_days=None`` reproduces the original behavior exactly.
 
     If ``output_path`` is given, every bee's result is appended to that CSV as
     soon as it is computed, so a crash never loses finished bees. Re-running with
@@ -576,6 +685,18 @@ def estimate_death_days(
         max_span = 0
     fixed_len = max_span + extra_days_after
 
+    # Optional per-bee emergence: when birth_days is given, start each bee's alive
+    # window at its estimated birth daynum (instead of the fixed 0 = first detection).
+    birth_lookup = {}
+    if birth_days is not None and len(birth_days) and {
+        "hive", id_col, "estimated_birth_daynum"
+    }.issubset(birth_days.columns):
+        for _h, _v, _bdn in zip(
+            birth_days["hive"], birth_days[id_col], birth_days["estimated_birth_daynum"]
+        ):
+            if pd.notna(_h) and pd.notna(_v) and pd.notna(_bdn):
+                birth_lookup[(str(_h), int(_v))] = float(_bdn)
+
     results = []
     for hive in hives:
         print(hive)
@@ -611,7 +732,20 @@ def estimate_death_days(
                 (num_detect, np.zeros(max(fixed_len - len(num_detect), 0)))
             )[:fixed_len]
 
-            model, trace, num_detections = estimator.fit(num_detect, progress=progress)
+            if birth_lookup:
+                # alive window starts at the estimated emergence; index into the
+                # series = estimated_birth_daynum - first daynum, clamped in-range.
+                _bdn = birth_lookup.get((str(hive), int(current_id)))
+                if _bdn is not None:
+                    sp = int(np.round(_bdn)) - int(bee_data["daynum"].iloc[0])
+                    sp = max(0, min(sp, len(num_detect) - 1))
+                else:
+                    sp = 0
+                model, trace, num_detections = estimator.fit(
+                    num_detect, switchpoint_emerged=sp, progress=progress
+                )
+            else:
+                model, trace, num_detections = estimator.fit(num_detect, progress=progress)
 
             death_day = trace.posterior["switchpoint_died"].mean().item()
             death_day_index = int(np.round(death_day))
@@ -640,6 +774,139 @@ def estimate_death_days(
             return pd.read_csv(output_path, on_bad_lines="skip")
         return pd.DataFrame(columns=out_cols)
     return pd.DataFrame(results)
+
+def estimate_birth_days(
+    dfday: pd.DataFrame,
+    *,
+    hives: Optional[Iterable[str]] = None,
+    estimator: Optional[BirthEstimator] = None,
+    extra_days_after: int = 25,
+    progress: bool = False,
+    output_path: Optional[Path] = None,
+    recalc: bool = False,
+) -> pd.DataFrame:
+    """
+    Estimate each bee's birth (emergence) day via a per-bee changepoint MCMC fit.
+
+    Mirror of :func:`estimate_death_days`: same per-bee series construction, resume
+    persistence, uid/hive handling and fixed-length padding. The only differences
+    are that the fit looks at an EARLY WINDOW (``estimator.birth_window`` days) and
+    extracts the *rising* changepoint ``switchpoint_emerged``. Run this BEFORE
+    ``estimate_death_days`` and pass the result back in via its ``birth_days`` arg.
+    """
+    if estimator is None:
+        estimator = BirthEstimator()
+    if hives is None:
+        cfg = get_config()
+        hives = cfg.hives
+
+    has_uid = "uid" in dfday.columns
+    id_col = "uid" if has_uid else "bee_id"
+    out_cols = (
+        ["hive", id_col, "bee_id", "estimated_birth_daynum"]
+        if has_uid
+        else ["hive", "bee_id", "estimated_birth_daynum"]
+    )
+
+    persist = output_path is not None
+    if persist:
+        output_path = Path(output_path)
+        if recalc and output_path.exists():
+            output_path.unlink()  # recalc=True -> true from-scratch run
+
+    # Work-units (hive, id) already on disk, so resume skips them.
+    done_keys = set()
+    if persist and not recalc and output_path.exists():
+        try:
+            prev = pd.read_csv(
+                output_path,
+                usecols=lambda c: c in ("hive", id_col),  # tolerate schema drift
+                on_bad_lines="skip",  # drop a torn final line from a mid-write crash
+            )
+            prev = prev.dropna(subset=["hive", id_col])
+            done_keys = {(str(h), int(v)) for h, v in zip(prev["hive"], prev[id_col])}
+        except Exception:
+            done_keys = set()
+
+    def _append_row(row: dict) -> None:
+        df_row = pd.DataFrame([row]).reindex(columns=out_cols)  # stable column order
+        write_header = not output_path.exists()  # header only on first write
+        with open(output_path, "a", newline="") as f:
+            df_row.to_csv(f, header=write_header, index=False)
+            f.flush()
+            os.fsync(f.fileno())  # commit to disk before the next multi-second fit
+
+    # Fixed birth-window length shared by every bee, so the PyMC graph compiles once.
+    # Bounded by the longest actual span so very short seasons don't over-pad.
+    if len(dfday):
+        spans = dfday.groupby(id_col)["daynum"]
+        max_span = int((spans.max() - spans.min() + 1).max())
+    else:
+        max_span = 0
+    birth_fixed_len = min(estimator.birth_window, max_span) if max_span else estimator.birth_window
+    birth_fixed_len = max(1, birth_fixed_len)
+
+    results = []
+    for hive in hives:
+        print(hive)
+        dfsel = dfday[dfday["hive"] == hive]
+
+        ids = dfsel[id_col].unique()
+        for i, current_id in enumerate(ids):
+            if i % 100 == 0:
+                print(i, len(ids))
+
+            if persist and (str(hive), int(current_id)) in done_keys:
+                continue
+
+            bee_data = dfsel[dfsel[id_col] == current_id].sort_values(by="daynum").copy()
+            if bee_data.empty:
+                continue
+            hive_mode = bee_data["hive"].mode().values[0]
+            bee_data = bee_data[bee_data["hive"] == hive_mode]
+
+            full_days = np.arange(bee_data["daynum"].min(), bee_data["daynum"].max() + 1)
+            bee_data = bee_data.set_index("daynum").reindex(full_days).reset_index()
+            numeric_cols = bee_data.select_dtypes(include="number").columns
+            bee_data[numeric_cols] = bee_data[numeric_cols].fillna(0)
+
+            num_detect = bee_data["num_detections"].to_numpy()
+            if len(num_detect) == 0:
+                continue
+            # Early window only: first birth_fixed_len days (trailing-zero padded so
+            # every bee has the same length -> the model graph compiles once).
+            num_detect = np.concatenate(
+                (num_detect, np.zeros(max(birth_fixed_len - len(num_detect), 0)))
+            )[:birth_fixed_len]
+
+            model, trace, num_detections = estimator.fit(num_detect, progress=progress)
+
+            birth_day = trace.posterior["switchpoint_emerged"].mean().item()
+            birth_day_index = int(np.round(birth_day))
+            # daynums in bee_data are consecutive (full_days reindex), so the daynum
+            # at the emergence index is first_daynum + index.
+            estimated_birth_daynum = bee_data["daynum"].iloc[0] + birth_day_index
+
+            row = {
+                "bee_id": bee_data["bee_id"].mode().values[0] if has_uid else current_id,
+                "hive": hive,
+                "estimated_birth_daynum": estimated_birth_daynum,
+            }
+            if has_uid:
+                row["uid"] = current_id
+
+            if persist:
+                _append_row(row)
+                done_keys.add((str(hive), int(current_id)))  # guard within-run dups
+            else:
+                results.append(row)
+
+    if persist:
+        if output_path.exists():
+            return pd.read_csv(output_path, on_bad_lines="skip")
+        return pd.DataFrame(columns=out_cols)
+    return pd.DataFrame(results)
+
 
 def create_birth_df(df_tags):
     birth_records = []
@@ -709,3 +976,28 @@ def create_death_df(df_beedeath):
     df_death = df_beedeath_clean[cols]
 
     return df_death
+
+
+def create_birthdate_df(df_beebirth):
+    """Map estimated_birth_daynum -> birthdate (mirror of create_death_df).
+
+    Note: distinct from the tag-based create_birth_df; this consumes the changepoint
+    estimate from estimate_birth_days / df_beebirth.csv.
+    """
+    # Drop rows where 'estimated_birth_daynum' is NaN
+    df_beebirth_clean = df_beebirth.dropna(subset=['estimated_birth_daynum']).copy()
+
+    # Convert 'estimated_birth_daynum' to integer
+    df_beebirth_clean['estimated_birth_daynum'] = df_beebirth_clean['estimated_birth_daynum'].astype(int)
+
+    # Map day numbers to dates using cfg.number_to_day
+    cfg = get_config()
+    df_beebirth_clean['birthdate'] = df_beebirth_clean['estimated_birth_daynum'].apply(lambda x: cfg.number_to_day.get(x))
+
+    # Keep only relevant columns
+    cols = ['hive', 'bee_id', 'birthdate']
+    if 'uid' in df_beebirth_clean.columns:
+        cols = ['hive', 'bee_id', 'uid', 'birthdate']
+    df_birth = df_beebirth_clean[cols]
+
+    return df_birth
