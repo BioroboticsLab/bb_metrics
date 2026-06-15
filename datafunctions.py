@@ -40,14 +40,76 @@ def _get_bd():
     return bd
 
 ################### Misc useful functions
-# takes timestampts, and converts them to integers
-def assign_integer_framenums(times):
-    sectimes = np.array([pd.Timestamp(t).hour*3600 + pd.Timestamp(t).minute*60 + pd.Timestamp(t).second + pd.Timestamp(t).microsecond/10**6 for t in times])
-    return np.floor(sectimes*3).astype(int)
 
-def assign_integer_framenums_hourminsec(hour,minute,second):
-    # second can be a float
-    return np.floor( (hour*3600 + minute*60 + second)*3 ).astype(int)
+# Last-resort sampling rate (frames/sec), used ONLY when fps cannot be inferred
+# from timestamps (e.g. fewer than 2 distinct timestamps, or hour/min/sec inputs
+# with no timestamps at all). This is a code fallback, NOT a config value: the
+# real rate varies by site/year (Berlin 2025 was 3 fps, Konstanz/Berlin 2026 are
+# 6 fps) and changes mid-recording during burst periods (6 -> ~14 fps), so fps is
+# always inferred from the data when possible. 6.0 matches the current standard.
+_FALLBACK_FPS = 6.0
+
+
+def infer_fps(timestamps, default=_FALLBACK_FPS, warn=True):
+    """Infer the detection sampling rate (frames/sec) from timestamps.
+
+    fps = 1 / median(positive gaps between consecutive UNIQUE timestamps). Using
+    unique timestamps collapses the multiple detections that share one frame; the
+    median over consecutive gaps ignores tracking gaps and recovers the dominant
+    rate. For a recording whose rate changes mid-stream (e.g. a 6 -> 14 fps burst)
+    this returns the dominant rate; compute fps per-window (slice the timestamps)
+    when a burst-accurate, time-varying rate is needed.
+
+    Args:
+        timestamps: array-like of datetime-like values (one per detection).
+        default: returned (with a warning) when fps cannot be inferred.
+        warn: emit a warning when falling back to `default`.
+
+    Returns:
+        float: estimated frames per second. `expected_dt = 1 / fps`.
+    """
+    import warnings
+    arr = list(timestamps)
+    if len(arr) >= 2:
+        ts = pd.to_datetime(pd.Series(arr))
+        if getattr(ts.dt, 'tz', None) is not None:       # diffs are tz-invariant
+            ts = ts.dt.tz_convert('UTC').dt.tz_localize(None)
+        ns = ts.to_numpy(dtype='datetime64[ns]').astype('int64')
+        ns = np.unique(ns[ns > np.iinfo(np.int64).min])  # sorted unique frame times (drop NaT)
+    else:
+        ns = np.empty(0, dtype='int64')
+    if ns.size < 2:
+        if warn:
+            warnings.warn(f"infer_fps: fewer than 2 distinct timestamps; "
+                          f"falling back to {default} fps.", stacklevel=2)
+        return float(default)
+    d = np.diff(ns) / 1e9                                 # seconds between frames
+    d = d[d > 0]
+    if d.size == 0:
+        if warn:
+            warnings.warn(f"infer_fps: no positive timestamp gaps; "
+                          f"falling back to {default} fps.", stacklevel=2)
+        return float(default)
+    return 1.0 / float(np.median(d))
+
+
+# takes timestampts, and converts them to integers
+def assign_integer_framenums(times, fps=None):
+    # fps defaults to the rate inferred from `times`; pass fps explicitly to force
+    # a rate. NOTE: seconds*fps assumes a uniform frame grid -- for burst-accurate
+    # frame indices under a time-varying rate, dense-rank the unique timestamps
+    # instead (fps-free).
+    if fps is None:
+        fps = infer_fps(times)
+    sectimes = np.array([pd.Timestamp(t).hour*3600 + pd.Timestamp(t).minute*60 + pd.Timestamp(t).second + pd.Timestamp(t).microsecond/10**6 for t in times])
+    return np.floor(sectimes*fps).astype(int)
+
+def assign_integer_framenums_hourminsec(hour,minute,second,fps=None):
+    # second can be a float. No timestamps to infer from here, so fps=None uses the
+    # warned _FALLBACK_FPS; pass fps explicitly when the recording rate is known.
+    if fps is None:
+        fps = infer_fps([], warn=True)   # no timestamps -> _FALLBACK_FPS (warns)
+    return np.floor( (hour*3600 + minute*60 + second)*fps ).astype(int)
 
 def flat_to_hist(flatrow):
     # assume that the hist is at the end of the row
@@ -229,8 +291,18 @@ def get_timestamp_int(df):
     # Map the timestamp to the corresponding integer
     return df['timestamp_start'].map(timestamp_start_num)
 
-def filter_df_by_numdetections(df,min_time_detection_minutes=1):
-    min_num_detections = min_time_detection_minutes*60*6
+def filter_df_by_numdetections(df,min_time_detection_minutes=1,fps=None,time_col='timestamp'):
+    # Keep rows whose 'num_detections' count corresponds to at least
+    # `min_time_detection_minutes` of tracked time. The count threshold depends on
+    # the sampling rate, so fps is inferred from per-detection timestamps when
+    # available (df[time_col]); pass fps explicitly when df carries only aggregated
+    # counts. With no way to infer, infer_fps falls back to _FALLBACK_FPS (warns).
+    if fps is None:
+        if time_col in df.columns:
+            fps = infer_fps(df[time_col])
+        else:
+            fps = infer_fps([], warn=True)
+    min_num_detections = round(min_time_detection_minutes*60*fps)
     filtered_df = df[df['num_detections'] >= min_num_detections].copy()
     return filtered_df
 
@@ -438,21 +510,22 @@ def get_tracked_dataframe(
 
     if not df.empty:
         # Transform coordinates using rotation configuration
-        # Detection pipeline outputs (x_rot, y_rot) in rotated image coords
-        # Transform to original image coordinates (top-left origin)
+        # Detection files store raw camera coordinates (top-left origin).
+        # transform_detections rotates them into the analysis frame
+        # (cw90 for konstanz2025); result stays top-left origin.
         from . import get_config
         from .rotation import get_rotation_config
 
         cfg = get_config()
         rot_cfg = get_rotation_config(cfg)
 
-        # Transform pixel coordinates
-        x_calib, y_calib = rot_cfg.transform_detections(
+        # Rotate raw camera pixel coordinates into the analysis frame
+        x_analysis, y_analysis = rot_cfg.transform_detections(
             df['x_pixels'].to_numpy(),
             df['y_pixels'].to_numpy()
         )
-        df['x_pixels'] = x_calib
-        df['y_pixels'] = y_calib
+        df['x_pixels'] = x_analysis
+        df['y_pixels'] = y_analysis
 
         # Transform orientation
         df['orientation_pixels'] = rot_cfg.transform_orientation(
@@ -922,8 +995,9 @@ def process_timestamp_chunk(
         raise ValueError(error_msg)
 
     # Transform coordinates using rotation configuration
-    # Detection pipeline outputs (x_rot, y_rot) in rotated image coords
-    # Transform to original image coordinates (top-left origin)
+    # Detection files store raw camera coordinates (top-left origin).
+    # transform_detections rotates them into the analysis frame
+    # (cw90 for konstanz2025); result stays top-left origin.
     if not df.empty:
         from . import get_config
         from .rotation import get_rotation_config
@@ -931,13 +1005,13 @@ def process_timestamp_chunk(
         cfg = get_config()
         rot_cfg = get_rotation_config(cfg)
 
-        # Transform pixel coordinates
-        x_calib, y_calib = rot_cfg.transform_detections(
+        # Rotate raw camera pixel coordinates into the analysis frame
+        x_analysis, y_analysis = rot_cfg.transform_detections(
             df['x_pixels'].to_numpy(),
             df['y_pixels'].to_numpy()
         )
-        df['x_pixels'] = x_calib
-        df['y_pixels'] = y_calib
+        df['x_pixels'] = x_analysis
+        df['y_pixels'] = y_analysis
 
     chunk_dict = {}
     time_segments = pd.date_range(

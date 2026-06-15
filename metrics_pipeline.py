@@ -54,6 +54,7 @@ def run_metrics_from_pairs(
     update: bool = True,
     time_division: str = "1min",
     min_num_detections: Optional[int] = None,
+    min_track_seconds: Optional[float] = None,
     save_xy_hist: bool = True,
     metrics_dir: Optional[Path] = None,
     num_processes: int = 6,
@@ -69,16 +70,19 @@ def run_metrics_from_pairs(
     if metrics_dir is None:
         raise ValueError("metrics_dir not set (pass metrics_dir or set cfg.metrics_dir)")
 
-    # set defaults for min_num_detections
-    if min_num_detections is None:
+    # Minimum tracked time required to compute metrics for a (bee, time-segment).
+    # Expressed in SECONDS and converted to a detection count per file using the
+    # fps inferred from that file's timestamps (in datafile_to_metrics), so the
+    # filter is consistent across sampling rates (3 fps, 6 fps, 14-fps bursts).
+    # These defaults reproduce the historical counts (90/30/12) exactly at 6 fps.
+    # `min_num_detections`, if given, is an explicit count override (fps-independent).
+    if min_num_detections is None and min_track_seconds is None:
         if time_division == "60min":
-            min_num_detections = 90
+            min_track_seconds = 15.0   # 90 detections at 6 fps
         elif time_division == "5min":
-            min_num_detections = 30
-        elif time_division == "1min":
-            min_num_detections = 12
-        else:
-            min_num_detections = 12
+            min_track_seconds = 5.0    # 30 detections at 6 fps
+        else:                           # "1min" and any finer/other division
+            min_track_seconds = 2.0    # 12 detections at 6 fps
 
     args = [
         (
@@ -89,6 +93,7 @@ def run_metrics_from_pairs(
             reprocess,
             time_division,
             min_num_detections,
+            min_track_seconds,
             save_xy_hist,
             str(metrics_dir),
             update,

@@ -247,6 +247,7 @@ def datafile_to_metrics(
     reprocess,
     time_division,
     min_num_detections,
+    min_track_seconds,
     save_xy_hist,
     metrics_dir,
     update=True,
@@ -276,6 +277,15 @@ def datafile_to_metrics(
                 return
 
         df = pd.concat([pd.read_parquet(d) for d in datafiles])
+
+        # Resolve the minimum-detections gate from tracked time using the fps
+        # inferred from this file's timestamps, so the threshold is consistent
+        # across sampling rates (3/6 fps and 14-fps bursts). An explicit
+        # min_num_detections (not None) overrides and is used as-is.
+        if min_num_detections is None:
+            mts = min_track_seconds if min_track_seconds is not None else 2.0
+            fps = dfunc.infer_fps(df['timestamp'])
+            min_num_detections = max(1, int(np.ceil(mts * fps)))
 
         # Generate time segments based on the specified time division
         time_segments = pd.date_range(start=timestamp_start, end=timestamp_end, freq=time_division)
@@ -557,63 +567,10 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
 
     # histograms
     num_detections = len(dfbee)
-    framehist = dfunc.getframehist(dfbee['y_hive'],dfbee['cam_id']) / num_detections
     xyhist = dfunc.getxyhist(dfbee['x_pixels'],dfbee['y_pixels'],dfbee['cam_id'])
 
     ## Comb usage
     combhist, comb_label_order = _compute_combhist(dfbee, grid_lookup, comb_label_order)
-
-    # Exit distance (median)
-    # 2025: the exit is located at (0cm, 0cm), in hive coordinates, by definition - i.e. the 'corner point'
-    # distance from exit
-    x_exit, y_exit = 0, 0
-    # get shift coordinates
-    #  shift the y pixels for ones on frame 2 (back side, bottom), to define the 'shortest path' to the exit
-    y_exitdist = dfbee['y_hive'].copy()
-    sel = (dfbee['cam_id']==cam0+1)&(dfbee['y_hive']>-cfg.offset_div_cm)
-    y_exitdist[sel] = -2*cfg.offset_div_cm - y_exitdist[sel]
-    exitdist = np.sqrt( (dfbee['x_hive_flat']-x_exit)**2 + (y_exitdist-y_exit)**2 )    
-    exitdist_median = np.median(exitdist)    
-
-    # Distance from center of current frame
-    framebins = [-cfg.offset_div_cm*2-10, -cfg.offset_div_cm, 10] # set limits to cover the frame (negative y_hive coords)
-    # get 'framenum' as digitized label
-    currentframe = np.tile(np.nan,len(dfbee))
-    sel0, sel1 = dfbee['cam_id']==cam0, dfbee['cam_id']==cam0+1
-    # Digitize y_pixels for cam0 and assign frame numbers 0 and 1
-    if sel0.any():
-        currentframe[sel0] = np.digitize(dfbee.loc[sel0, 'y_hive'], framebins) - 1
-    # Digitize y_pixels for cam1 and assign frame numbers 2 and 3
-    if sel1.any():
-        currentframe[sel1] = np.digitize(dfbee.loc[sel1, 'y_hive'], framebins) - 1 + 2
-    # Calculate frame centers
-    x_center = cfg.frame_width_cm/2
-    bottomcenter, topcenter = -0.5*cfg.offset_div_cm, -1.5*cfg.offset_div_cm
-
-    y_centers = {0: bottomcenter, 1: topcenter, 2: bottomcenter, 3: topcenter}
-    # Loop through each frame number and calculate the median distance
-    median_distances = np.full(4, np.nan)
-    for frame_num in range(4):
-        bee_in_frame = currentframe == frame_num
-        if np.any(bee_in_frame):
-            # Calculate distances from the frame center
-            x_diff = dfbee.loc[bee_in_frame, 'x_pixels'] - x_center
-            y_diff = dfbee.loc[bee_in_frame, 'y_pixels'] - y_centers[frame_num]
-            distances = np.sqrt(x_diff**2 + y_diff**2)
-            median_distances[frame_num] = np.median(distances)
-    
-    # Num Outside Trips (approx measure)
-    numtrips = 0
-    longbreaks = np.where(dtimes>=time_outside_trip)[0]
-    for breakind in longbreaks:
-        # if was near the exit before last being seen, and next seen near the exit again
-        if np.all(exitdist.iloc[breakind-1:breakind+1]<exit_dist_trip_threshold):
-            numtrips = numtrips+1
-    # check for a trip at the end
-    if exitdist.iloc[len(dfbee)-1]<exit_dist_trip_threshold:
-        # time until the end is more than the outside trip time, count it
-        if (last_df_time - dfbee.iloc[len(dfbee)-1]['timestamp']).total_seconds() > time_outside_trip:
-            numtrips = numtrips+1       
 
     # Fraction squares visited in this time period
     fraction_squares_visited = np.nansum(xyhist>0)/(cfg.numxbins*cfg.numybins)
@@ -621,28 +578,104 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
     # Add bee_id to the dictionary
     bee_id = dfbee['bee_id'].iloc[0]
 
-    # Create a dictionary of metrics
-    metrics_dict = {
-        'bee_id': bee_id,
-        'num_detections': num_detections,
-        'dispersion': dispersion,
-        'speed_median': speed_median,
-        'speed_iqr': speed_iqr,
-        'num_trips': numtrips,
-        'fraction_squares_visited': fraction_squares_visited,
-        'exit_distance_median': exitdist_median,
-        'frame_0_hist': framehist[0, 0],
-        'frame_1_hist': framehist[0, 1],
-        'frame_2_hist': framehist[1, 0],
-        'frame_3_hist': framehist[1, 1],
-        'frame_0_centermedian': median_distances[0],
-        'frame_1_centermedian': median_distances[1],
-        'frame_2_centermedian': median_distances[2],
-        'frame_3_centermedian': median_distances[3],
-        'inplace_events': inplace_events,
-        'burst_events': burst_events,
-        'large_turn_events': large_turn_events
-    }
+    # Frame and exit-distance metrics assume the 4-frame, negative-y comb geometry
+    # (cfg.offset_div_cm; exit at the (0,0) corner point). Sites with a different
+    # comb layout (e.g. the 2019 2-frame hive) set cfg.compute_frame_exit_metrics =
+    # False to skip them. The getattr default keeps the historical behavior (and the
+    # exact metrics_dict column order) for every year that does not set the flag.
+    if getattr(cfg, 'compute_frame_exit_metrics', True):
+        # which 'frame' of the observation hive the bee was on
+        framehist = dfunc.getframehist(dfbee['y_hive'],dfbee['cam_id']) / num_detections
+
+        # Exit distance (median)
+        # 2025: the exit is located at (0cm, 0cm), in hive coordinates, by definition - i.e. the 'corner point'
+        # distance from exit
+        x_exit, y_exit = 0, 0
+        # get shift coordinates
+        #  shift the y pixels for ones on frame 2 (back side, bottom), to define the 'shortest path' to the exit
+        y_exitdist = dfbee['y_hive'].copy()
+        sel = (dfbee['cam_id']==cam0+1)&(dfbee['y_hive']>-cfg.offset_div_cm)
+        y_exitdist[sel] = -2*cfg.offset_div_cm - y_exitdist[sel]
+        exitdist = np.sqrt( (dfbee['x_hive_flat']-x_exit)**2 + (y_exitdist-y_exit)**2 )
+        exitdist_median = np.median(exitdist)
+
+        # Distance from center of current frame
+        framebins = [-cfg.offset_div_cm*2-10, -cfg.offset_div_cm, 10] # set limits to cover the frame (negative y_hive coords)
+        # get 'framenum' as digitized label
+        currentframe = np.tile(np.nan,len(dfbee))
+        sel0, sel1 = dfbee['cam_id']==cam0, dfbee['cam_id']==cam0+1
+        # Digitize y_pixels for cam0 and assign frame numbers 0 and 1
+        if sel0.any():
+            currentframe[sel0] = np.digitize(dfbee.loc[sel0, 'y_hive'], framebins) - 1
+        # Digitize y_pixels for cam1 and assign frame numbers 2 and 3
+        if sel1.any():
+            currentframe[sel1] = np.digitize(dfbee.loc[sel1, 'y_hive'], framebins) - 1 + 2
+        # Calculate frame centers
+        x_center = cfg.frame_width_cm/2
+        bottomcenter, topcenter = -0.5*cfg.offset_div_cm, -1.5*cfg.offset_div_cm
+
+        y_centers = {0: bottomcenter, 1: topcenter, 2: bottomcenter, 3: topcenter}
+        # Loop through each frame number and calculate the median distance
+        median_distances = np.full(4, np.nan)
+        for frame_num in range(4):
+            bee_in_frame = currentframe == frame_num
+            if np.any(bee_in_frame):
+                # Calculate distances from the frame center
+                x_diff = dfbee.loc[bee_in_frame, 'x_pixels'] - x_center
+                y_diff = dfbee.loc[bee_in_frame, 'y_pixels'] - y_centers[frame_num]
+                distances = np.sqrt(x_diff**2 + y_diff**2)
+                median_distances[frame_num] = np.median(distances)
+
+        # Num Outside Trips (approx measure)
+        numtrips = 0
+        longbreaks = np.where(dtimes>=time_outside_trip)[0]
+        for breakind in longbreaks:
+            # if was near the exit before last being seen, and next seen near the exit again
+            if np.all(exitdist.iloc[breakind-1:breakind+1]<exit_dist_trip_threshold):
+                numtrips = numtrips+1
+        # check for a trip at the end
+        if exitdist.iloc[len(dfbee)-1]<exit_dist_trip_threshold:
+            # time until the end is more than the outside trip time, count it
+            if (last_df_time - dfbee.iloc[len(dfbee)-1]['timestamp']).total_seconds() > time_outside_trip:
+                numtrips = numtrips+1
+
+        # Create a dictionary of metrics
+        metrics_dict = {
+            'bee_id': bee_id,
+            'num_detections': num_detections,
+            'dispersion': dispersion,
+            'speed_median': speed_median,
+            'speed_iqr': speed_iqr,
+            'num_trips': numtrips,
+            'fraction_squares_visited': fraction_squares_visited,
+            'exit_distance_median': exitdist_median,
+            'frame_0_hist': framehist[0, 0],
+            'frame_1_hist': framehist[0, 1],
+            'frame_2_hist': framehist[1, 0],
+            'frame_3_hist': framehist[1, 1],
+            'frame_0_centermedian': median_distances[0],
+            'frame_1_centermedian': median_distances[1],
+            'frame_2_centermedian': median_distances[2],
+            'frame_3_centermedian': median_distances[3],
+            'inplace_events': inplace_events,
+            'burst_events': burst_events,
+            'large_turn_events': large_turn_events
+        }
+    else:
+        # 2-frame / non-standard comb layout: geometry-independent metrics only
+        # (frame_*_hist, frame_*_centermedian, exit_distance_median and num_trips
+        # are omitted because they depend on the 4-frame exit geometry).
+        metrics_dict = {
+            'bee_id': bee_id,
+            'num_detections': num_detections,
+            'dispersion': dispersion,
+            'speed_median': speed_median,
+            'speed_iqr': speed_iqr,
+            'fraction_squares_visited': fraction_squares_visited,
+            'inplace_events': inplace_events,
+            'burst_events': burst_events,
+            'large_turn_events': large_turn_events
+        }
 
     if combhist is not None and comb_label_order is not None:
         for idx, label in enumerate(comb_label_order):
