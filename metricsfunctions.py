@@ -263,7 +263,14 @@ def datafile_to_metrics(
 
         # set filenames for saving
         # these should be e.g. metrics-5min-Hive_B_2024-08-27T03_00_00Z--2024-08-27T09_00_00Z.parquet
-        hive_save_name = 'Hive_' + hive + Path(datafiles[0]).name[5:]  # data files have already been time-matched, so just use the first one
+        # Per-camera files (2024+) start with 'Cam_<id>_'; strip that so the save name
+        # is 'Hive_<hive>_<ISO>--<ISO>'. Combined files (2016/2019) have both cameras in
+        # one file and no 'Cam_' prefix, so keep the full name (prefixed with '_'). Both
+        # cases yield a name that parse_hive_name / parse_data_file_timestamps can read
+        # downstream (e.g. build_day_xyhist).
+        _src_name = Path(datafiles[0]).name  # data files already time-matched; use the first
+        _name_suffix = _src_name[5:] if _src_name.startswith('Cam_') else ('_' + _src_name)
+        hive_save_name = 'Hive_' + hive + _name_suffix
         metricsfile = metrics_dir / f"metrics-{time_division}-{hive_save_name}"
         xyhistfile = metrics_dir / f"xyhist-{time_division}-{hive_save_name.replace('.parquet', '.h5')}"
 
