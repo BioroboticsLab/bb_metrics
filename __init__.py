@@ -1,9 +1,11 @@
 """
 Simple config loader for bb_metrics.
 
-Usage in notebooks/scripts:
-    from bb_metrics.config import berlin2025 as cfg
+Experiment configs live OUTSIDE this repo (in your per-year data/working folders)
+and are loaded by path:
+
     import bb_metrics
+    cfg = bb_metrics.load_config("berlin2025.py")   # path to your season config
     bb_metrics.set_config(cfg)
     # other modules can fetch via bb_metrics.get_config()
 """
@@ -28,3 +30,6 @@ def get_config() -> Any:
 
 # UID helpers for reused tag IDs
 from .uid import assign_uid, build_reuse_intervals  # noqa: E402
+
+# External experiment-config loader (configs live outside this repo; see config/__init__.py)
+from .config import load_config, default_label_config_path  # noqa: E402

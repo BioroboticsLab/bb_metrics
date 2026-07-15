@@ -64,10 +64,9 @@ Thumbs.db
 # Local outputs and data (if any)
 saved_output/
 *.log
-/__pycache__
-/__pycache__
-__pycache__/__init__.cpython-312.pyc
-*.pyc
-config/__pycache__/berlin2025.cpython-312.pyc
-*.pyc
-*.pyc
+
+# Experiment configs live outside this public repo (loaded by path via config/__init__.py).
+# Keep only the loader and the example template under config/.
+config/*.py
+!config/__init__.py
+!config/example_config.py

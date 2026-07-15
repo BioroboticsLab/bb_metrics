@@ -16,19 +16,29 @@ The package supports multi-hive experiments with configurable experimental setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/bb_metrics.git
+git clone https://github.com/BioroboticsLab/bb_metrics.git
 cd bb_metrics
 
-# Install dependencies (recommended: use a virtual environment)
-pip install -r requirements.txt
+# Install (recommended: use a virtual environment). Dependencies come from pyproject.toml.
+pip install -e .
 ```
 
 ## Configuration
 
-Before using the package, set up a configuration file for your experiment. Example configs are provided in `config/`:
+Experiment configs are **not** stored in this repo (they hold experiment-specific
+paths and settings). Each experiment's config is a plain Python module kept in that
+experiment's data folder, and loaded by **path**:
 
-- `berlin2025.py` - Multi-hive setup (4 hives, A-D)
-- `konstanz2025.py` - Single-hive setup
+```python
+import bb_metrics
+cfg = bb_metrics.load_config("/path/to/your/beesbook2025/berlin2025.py")
+bb_metrics.set_config(cfg)
+```
+
+Use [`config/example_config.py`](config/example_config.py) as a template: copy it into
+your experiment's data folder, rename it (e.g. `berlin2025.py`), and fill in the paths,
+dates, hive/camera topology, and imaging constants. The shared `label_classes.json`
+ships with the package and is resolved automatically via `default_label_config_path()`.
 
 
 ## Processing Pipeline
@@ -260,8 +270,8 @@ df_feedervisits = pd.read_parquet(cfg.metrics_dir / 'df_feedervisits.parquet')
 
 ### Configuration
 
-- **`config/`** - Experiment-specific configuration files
-- **`__init__.py`** - Config management (`set_config()`, `get_config()`)
+- **`config/`** - Config loader (`load_config()`, `default_label_config_path()`), `example_config.py` template, and shared `label_classes.json`. Experiment configs themselves live outside this repo.
+- **`__init__.py`** - Config management (`set_config()`, `get_config()`, `load_config()`)
 
 ## Key Functions Reference
 
