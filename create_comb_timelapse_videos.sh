@@ -2,11 +2,14 @@
 # MakeVideosPerHive.sh
 # Combine cam pairs per hive into side-by-side rotated videos.
 # Default: scale to 50%; use --full-res to keep full resolution.
+# --subdir NAME reads cam-N/NAME/*.png instead of cam-N/*.png, i.e. the images in place
+# in the background pipeline's output (e.g. --subdir int0s_winday).
 
 # --- Default Configuration ---
 comb_images_dir="./"
 OUTDIR="videos_per_hive"
 FULL_RES=false
+SUBDIR=""
 
 # --- Parse command-line arguments ---
 while [[ $# -gt 0 ]]; do
@@ -23,9 +26,13 @@ while [[ $# -gt 0 ]]; do
       FULL_RES=true
       shift
       ;;
+    --subdir)
+      SUBDIR="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
-      echo "Usage: $0 [--comb-images-dir DIR] [--outdir DIR] [--full-res]"
+      echo "Usage: $0 [--comb-images-dir DIR] [--subdir NAME] [--outdir DIR] [--full-res]"
       exit 1
       ;;
   esac
@@ -37,6 +44,7 @@ mkdir -p "$OUTDIR"
 echo "Using comb_images_dir: $comb_images_dir"
 echo "Using output directory: $OUTDIR"
 echo "Full resolution: $FULL_RES"
+[ -n "$SUBDIR" ] && echo "Image subdir per camera: $SUBDIR"
 
 # --- Define hives as: hive_name cam_left cam_right ---
 HIVES=(
@@ -50,8 +58,8 @@ HIVES=(
 for hive_info in "${HIVES[@]}"; do
     set -- $hive_info
     hive=$1
-    cam_left_dir="$comb_images_dir/$2"
-    cam_right_dir="$comb_images_dir/$3"
+    cam_left_dir="$comb_images_dir/$2${SUBDIR:+/$SUBDIR}"
+    cam_right_dir="$comb_images_dir/$3${SUBDIR:+/$SUBDIR}"
 
     if [ ! -d "$cam_left_dir" ] || [ ! -d "$cam_right_dir" ]; then
         echo "Skipping hive $hive ($cam_left_dir,$cam_right_dir) - missing directories"

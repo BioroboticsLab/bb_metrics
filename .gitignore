@@ -70,3 +70,4 @@ saved_output/
 config/*.py
 !config/__init__.py
 !config/example_config.py
+*.pyc

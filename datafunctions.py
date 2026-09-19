@@ -17,6 +17,7 @@ from pathlib import Path
 import dill
 import uuid
 from functools import lru_cache
+from typing import Optional
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
@@ -804,8 +805,59 @@ def with_alpha(rgba, a):
 
 
 
-def parse_background_image_fname(fname: str | Path, prefix: str = "background_"):
-    """Parse comb image filenames by stripping a prefix and using bb_binary.parse_image_fname."""
+def cam_from_path(path) -> Optional[int]:
+    """Find a 'cam-<n>' token in a path: filename first, then the parent directories."""
+    path = Path(path)
+    m = re.search(r"cam-(\d+)", path.name)
+    if m:
+        return int(m.group(1))
+    for part in reversed(path.parts[:-1]):
+        m = re.fullmatch(r"cam-(\d+)", part)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def background_image_key(fname: str | Path, cam: int, prefix: str = "background_") -> str:
+    """Canonical join key between a background image and its annotation file.
+
+    The key is ``cam-<n>_<raw timestamp token>``, where the token is what is left of the
+    filename after dropping any leading annotation id, the prefix, a ``cam-<n>_`` part
+    and the extension. So
+    ``background_cam-0_20250701T112749.804969.348Z.png`` and
+    ``06_background_cam-0_20250701T112749.804969.348Z.json`` both key on
+    ``cam-0_20250701T112749.804969.348Z``.
+
+    Two details this has to respect:
+
+    * The camera is prepended explicitly because it is not always in the filename --
+      Berlin 2026 encodes it only in the ``cam-<n>/`` directory. Without it, one
+      camera's annotation would merge onto every camera's image for that timestamp.
+    * The key is the raw token, not the parsed timestamp. ``parse_image_fname`` returns
+      different sub-second values for the .png and the .json of the same image (the
+      .png keeps its extension through parsing and loses the microseconds; the .json
+      does not), so a parsed-timestamp key would never match.
+    """
+    stem = Path(fname).name
+    if prefix and prefix in stem:
+        stem = stem.split(prefix, 1)[1]
+    stem = Path(stem).stem  # drop the extension only
+    stem = re.sub(r"^cam-\d+_", "", stem)
+    return f"cam-{int(cam)}_{stem}"
+
+
+def parse_background_image_fname(
+    fname: str | Path, prefix: str = "background_", cam_hint: Optional[int] = None
+):
+    """Parse comb image filenames by stripping a prefix and using bb_binary.parse_image_fname.
+
+    Some seasons write the camera into the filename
+    ('background_cam-0_20250613T075149.775333.323Z.png'); others omit it and encode the
+    camera only in the containing 'cam-<n>/' directory
+    ('background_20260529T000000.000000.000Z.png', Berlin 2026). When the bare name
+    cannot be parsed and the camera is known from elsewhere, retry with 'cam-<n>_'
+    spliced back in.
+    """
     basename = Path(fname).name
     if prefix and prefix in basename:
         basename = basename.split(prefix, 1)[1]
@@ -816,23 +868,60 @@ def parse_background_image_fname(fname: str | Path, prefix: str = "background_")
 
     from bb_binary.parsing import parse_image_fname
 
-    return parse_image_fname(basename)
+    try:
+        return parse_image_fname(basename)
+    except Exception:
+        if cam_hint is None:
+            raise
+        return parse_image_fname(f"cam-{int(cam_hint)}_{basename}")
+
+
+def comb_background_source(cfg) -> tuple:
+    """Where a config's comb background images live: ``(root, subdir)``.
+
+    ``root`` holds one ``cam-<n>/`` folder per camera. ``subdir`` is an extra folder
+    inside each of them, or None. Configs that set ``comb_backgrounds_dir`` (and
+    optionally ``comb_backgrounds_subdir``) read the images in place from the
+    background pipeline's output, e.g.
+    ``results/data_backgrounds/single_video_frames/cam-0/int0s_winday/``. Configs that
+    don't expect them directly in ``comb_images_root/cam-<n>/``, as in earlier seasons.
+    """
+    root = getattr(cfg, "comb_backgrounds_dir", None) or cfg.comb_images_root
+    subdir = getattr(cfg, "comb_backgrounds_subdir", None)
+    return Path(root), subdir
+
+
+def background_cam_dirs(root: Path, subdir: Optional[str] = None) -> list:
+    """The per-camera image folders under ``root``: ``cam-<n>/`` or ``cam-<n>/<subdir>/``."""
+    dirs = []
+    for cam_dir in sorted(Path(root).glob("cam-*")):
+        image_dir = cam_dir / subdir if subdir else cam_dir
+        if image_dir.is_dir():
+            dirs.append(image_dir)
+    return dirs
 
 
 def build_background_files_df(
-    comb_background_dir: Path, cam_hive_map: dict, prefix: str = "background_"
+    comb_background_dir: Path,
+    cam_hive_map: dict,
+    prefix: str = "background_",
+    subdir: Optional[str] = None,
 ):
     comb_background_dir = Path(comb_background_dir)
     file_glob = f"{prefix}*" if prefix else "*"
+    where = f"cam-*/{subdir}/" if subdir else "cam-*/"
 
     rows = []
-    for cam_dir in sorted(comb_background_dir.glob("cam-*")):
-        if not cam_dir.is_dir():
-            continue
+    skipped = []
+    for cam_dir in background_cam_dirs(comb_background_dir, subdir):
+        cam_hint = cam_from_path(cam_dir)
         for path in sorted(cam_dir.glob(file_glob)):
             try:
-                cam, timestamp = parse_background_image_fname(path.name, prefix=prefix)
+                cam, timestamp = parse_background_image_fname(
+                    path.name, prefix=prefix, cam_hint=cam_hint
+                )
             except Exception:
+                skipped.append(path.name)
                 continue
 
             rows.append(
@@ -844,7 +933,19 @@ def build_background_files_df(
                 }
             )
 
+    # An unparseable naming scheme used to return an empty frame silently, which then
+    # looks like "no comb images" much further downstream. Say so here instead.
+    if skipped:
+        print(
+            f"WARNING: {len(skipped)} file(s) under {comb_background_dir} could not be "
+            f"parsed, e.g. {skipped[:3]}"
+        )
+
     if not rows:
+        print(
+            f"WARNING: no background images parsed under {comb_background_dir} "
+            f"(looked in {where} for '{file_glob}')."
+        )
         background_files_df = pd.DataFrame(
             columns=["path", "cam", "hive", "timestamp", "day", "image_key"]
         )
@@ -854,7 +955,10 @@ def build_background_files_df(
         pd.DataFrame(rows).sort_values(["cam", "timestamp"]).reset_index(drop=True)
     )
     background_files_df["day"] = background_files_df["timestamp"].dt.round("D")
-    background_files_df["image_key"] = background_files_df["path"].map(lambda p: Path(p).stem)
+    background_files_df["image_key"] = [
+        background_image_key(path, cam, prefix=prefix)
+        for path, cam in zip(background_files_df["path"], background_files_df["cam"])
+    ]
     return background_files_df
 
 
@@ -863,11 +967,21 @@ def build_annotation_files_df(
 ):
     annotations_dir = Path(annotations_dir)
 
+    # Annotations may sit flat in annotations/ or under annotations/cam-<n>/.
+    ann_paths = sorted(annotations_dir.glob("*.json")) + sorted(
+        annotations_dir.glob("cam-*/*.json")
+    )
+
     ann_rows = []
-    for path in sorted(annotations_dir.glob("*.json")):
+    skipped = []
+    for path in ann_paths:
+        cam_hint = cam_from_path(path)
         try:
-            cam, timestamp = parse_background_image_fname(path.name, prefix=prefix)
+            cam, timestamp = parse_background_image_fname(
+                path.name, prefix=prefix, cam_hint=cam_hint
+            )
         except Exception:
+            skipped.append(path.name)
             continue
 
         ann_id = None
@@ -876,14 +990,6 @@ def build_annotation_files_df(
             if ann_prefix.isdigit():
                 ann_id = int(ann_prefix)
 
-        stem = Path(path).stem
-        if prefix and prefix in stem:
-            image_key = prefix + stem.split(prefix, 1)[1]
-        elif "_" in stem:
-            image_key = stem.split("_", 1)[1]
-        else:
-            image_key = stem
-
         ann_rows.append(
             {
                 "annotation_id": ann_id,
@@ -891,8 +997,17 @@ def build_annotation_files_df(
                 "cam": cam,
                 "hive": cam_hive_map.get(cam),
                 "timestamp": timestamp,
-                "image_key": image_key,
+                "image_key": background_image_key(path, cam, prefix=prefix),
             }
+        )
+
+    if skipped:
+        # Most likely a name with no 'cam-<n>' anywhere in it (filename or parent dir),
+        # in which case the camera is genuinely unrecoverable and the file must be named
+        # or filed per camera before it can be matched to an image.
+        print(
+            f"WARNING: {len(skipped)} annotation file(s) under {annotations_dir} could "
+            f"not be parsed, e.g. {skipped[:3]}"
         )
 
     if not ann_rows:
@@ -909,14 +1024,26 @@ def build_annotation_files_df(
 
 
 def build_combined_annotation_df(
-    comb_background_dir: Path, cam_hive_map: dict, prefix: str = "background_"
+    comb_background_dir: Path,
+    cam_hive_map: dict,
+    prefix: str = "background_",
+    subdir: Optional[str] = None,
+    annotations_dir: Optional[Path] = None,
 ):
+    """Join background images to their annotation files.
+
+    ``annotations_dir`` defaults to ``comb_background_dir / "annotations"``. Pass it
+    explicitly when the images are read in place from somewhere else (see
+    :func:`comb_background_source`), so annotations stay in the working folder.
+    """
     comb_background_dir = Path(comb_background_dir)
+    if annotations_dir is None:
+        annotations_dir = comb_background_dir / "annotations"
     background_files_df = build_background_files_df(
-        comb_background_dir, cam_hive_map, prefix=prefix
+        comb_background_dir, cam_hive_map, prefix=prefix, subdir=subdir
     )
     annotation_files_df = build_annotation_files_df(
-        comb_background_dir / "annotations", cam_hive_map, prefix=prefix
+        annotations_dir, cam_hive_map, prefix=prefix
     )
 
     combined_df = background_files_df.merge(

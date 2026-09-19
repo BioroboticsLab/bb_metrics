@@ -79,27 +79,42 @@ def parse_annotation_xml(xmlfilename: Path) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def build_cam_timestamps(base_dir: Path, prefix: str = "background_") -> pd.DataFrame:
+def build_cam_timestamps(
+    base_dir: Path, prefix: str = "background_", subdir: Optional[str] = None
+) -> pd.DataFrame:
     """
     Walk a directory tree of PNGs and extract camera id + timestamp from filenames.
     Searches subdirectories (e.g., cam-*/...) and uses bb_binary.parse_image_fname
-    after stripping an optional prefix.
+    after stripping an optional prefix. With ``subdir``, reads only
+    ``cam-*/<subdir>/*.png`` (see ``datafunctions.comb_background_source``).
     """
-    from bb_binary.parsing import parse_image_fname
+    from .datafunctions import (
+        background_cam_dirs,
+        cam_from_path,
+        parse_background_image_fname,
+    )
 
     rows = []
+    skipped = []
     base_dir = Path(base_dir)
-    all_pngs = sorted(p for p in base_dir.rglob("*.png"))
-    if not all_pngs:
+    if subdir:
+        all_pngs = sorted(
+            p for d in background_cam_dirs(base_dir, subdir) for p in d.glob("*.png")
+        )
+    else:
+        all_pngs = sorted(p for p in base_dir.rglob("*.png"))
+    if not all_pngs and not subdir:
         # explicit cam-* glob (in case the filesystem behaves oddly)
         all_pngs = sorted(base_dir.glob("cam-*/*.png"))
     for p in all_pngs:
-        name = p.name
-        if prefix and prefix in name:
-            name = name.split(prefix, 1)[1]
+        # The camera may live in the filename or only in the 'cam-<n>/' directory
+        # (Berlin 2026 writes 'background_<TS>Z.png' with no camera in the name).
         try:
-            camera, ts = parse_image_fname(name)
+            camera, ts = parse_background_image_fname(
+                p.name, prefix=prefix, cam_hint=cam_from_path(p)
+            )
         except Exception:
+            skipped.append(p.name)
             continue
         rows.append(
             {
@@ -109,11 +124,19 @@ def build_cam_timestamps(base_dir: Path, prefix: str = "background_") -> pd.Data
             }
         )
 
+    if skipped:
+        print(
+            f"WARNING: {len(skipped)} PNG file(s) under {base_dir} could not be parsed, "
+            f"e.g. {skipped[:3]}"
+        )
+
     if not rows:
-        print(f"ERROR: No matching PNG files found under {base_dir}.")
+        where = f"{base_dir}/cam-*/{subdir}/" if subdir else str(base_dir)
+        print(f"ERROR: No matching PNG files found under {where}.")
         raise FileNotFoundError(
-            f"No matching PNG files under {base_dir}. Expected filenames like "
-            f"'{prefix}cam-<n>_<TS>Z[--<TS>Z].png'."
+            f"No matching PNG files under {where}. Expected filenames like "
+            f"'{prefix}cam-<n>_<TS>Z[--<TS>Z].png', or '{prefix}<TS>Z.png' inside a "
+            f"'cam-<n>/' directory."
         )
 
     df_cam_timestamps = (
