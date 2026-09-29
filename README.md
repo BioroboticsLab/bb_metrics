@@ -252,6 +252,44 @@ df_feedervisits = pd.read_parquet(cfg.metrics_dir / 'df_feedervisits.parquet')
 - Daily and hourly aggregations
 - Weather correlations
 
+### Birth, death and tag re-use (`lifespan.py`)
+
+Tags are re-used within a season, so one bee_id can be several bees. A bee is a **uid**
+(`bee_id + generation * 4096`, generations from `dftags`, see `uid.py`), and each uid gets its
+own birth and death.
+
+`lifespan.py` fits the changepoint model of `BirthEstimator` / `LifetimeEstimator` **exactly**:
+the two daily detection rates (Beta priors) integrate out in closed form and the discrete
+changepoint is summed over, so every uid of a season takes seconds instead of hours of MCMC.
+It needs only numpy / pandas / scipy and imports nothing else from this package, so it also runs
+as a plain script.
+
+```python
+from bb_metrics import lifespan as ls
+
+# which tag numbers are free now (current bee dead >= margin days before the last complete day);
+# also reconciles the tag log with the detections and calibrates the detection cut
+res = ls.run_free_tags("daydatamat.csv", tag_log="tag_log.csv", out_dir="free_tags/")
+
+# birth and death of every uid; model="two_step" is the legacy chain, "joint" fits both together
+df_bd = ls.estimate_birth_death("daydatamat.csv", dftags=dftags, params=res["params"])
+
+# drop-ins with the legacy series construction and output columns
+df_beebirth = ls.estimate_birth_days_exact(dfday, estimator=mp.BirthEstimator())
+df_beedeath = ls.estimate_death_days_exact(dfday, estimator=mp.LifetimeEstimator(), birth_days=df_beebirth)
+```
+
+```bash
+python bb_metrics/lifespan.py daydatamat.csv --log tag_log.csv --out free_tags/
+```
+
+Differences from the PyMC chain in the new functions (the drop-ins keep the legacy behaviour):
+days with missing or partial recording are masked instead of counted as "not seen"; "detected"
+is a calibrated cut instead of 2,500/day, because decoding errors (above all from the twin tag,
+same number on the other parity sheet) keep a dead tag well above that; a bee alive at the end
+is right-censored instead of forced to die there; `p_real` gives the evidence for a real bee
+against decoder noise.
+
 ## Module Overview
 
 ### Core Modules
@@ -262,6 +300,8 @@ df_feedervisits = pd.read_parquet(cfg.metrics_dir / 'df_feedervisits.parquet')
 - **`feedercams.py`** - Feeder/exit camera detection processing and visit calculation
 - **`calibration.py`** - Camera calibration, corner detection, pixel-to-cm conversion
 - **`rotation.py`** - Coordinate system rotation utilities
+- **`lifespan.py`** - Exact birth/death changepoint posteriors per uid, tag-log reconciliation, detection-cut calibration, free-tag calls
+- **`uid.py`** - uid (tag generation) assignment from the tag-introduction table
 
 ### Utility Modules
 

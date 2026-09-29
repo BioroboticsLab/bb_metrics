@@ -17,7 +17,6 @@ from pathlib import Path
 import re
 from typing import Iterable, List, Optional
 
-import numpy as np
 import pandas as pd
 
 from . import get_config
@@ -49,6 +48,7 @@ def parse_annotation_xml(xmlfilename: Path) -> pd.DataFrame:
                     "xbr": float(box.attrib["xbr"]),
                     "ybr": float(box.attrib["ybr"]),
                     "points": None,
+                    "outside": box.attrib.get("outside") == "1",
                 }
             )
 
@@ -73,6 +73,9 @@ def parse_annotation_xml(xmlfilename: Path) -> pd.DataFrame:
                     "xbr": None,
                     "ybr": None,
                     "points": coords,
+                    # CVAT marks a track that has ended (object left the view) with
+                    # outside="1"; such shapes are not real annotations.
+                    "outside": pts.attrib.get("outside") == "1",
                 }
             )
 
@@ -171,6 +174,11 @@ def corner_points_from_annotations(
 ) -> pd.DataFrame:
     """
     Extract left/right corner points from annotations and attach timestamps.
+
+    On stitched (side-by-side) videos the two corners can be annotated either as one
+    two-point shape per frame or as a separate single-point track per camera; each
+    point is assigned to a camera by which half of the video it lies in.
+
     Returns DataFrame with columns: hive, cam, timestamp, corner_x, corner_y, midday_utc.
     """
     if cfg is None:
@@ -212,46 +220,44 @@ def corner_points_from_annotations(
 
         left_cam, right_cam = hive_cam_map[hive]
 
-        pts_df = xdf.loc[xdf["type"].str.lower() == "points", ["frame", "points"]].copy()
+        is_point = (xdf["type"].str.lower() == "points") & ~xdf["outside"]
+        pts_df = xdf.loc[is_point, ["frame", "points"]]
 
-        for _, row in pts_df.iterrows():
-            frame = int(row["frame"])
-            pts = row["points"]
-            if not isinstance(pts, list) or len(pts) < 2:
-                continue
+        # (frame, cam, x, y), scaled to full resolution
+        cam_points = []
+        for frame, pts in zip(pts_df["frame"].astype(int), pts_df["points"]):
+            if annot_stitched:
+                # Every point on a frame is pooled, so both ways of annotating work:
+                # one two-point shape per frame ('x1,y1;x2,y2', Berlin/Konstanz 2025)
+                # or one single-point track per camera (Berlin 2026). Each point goes
+                # to the camera whose half of the side-by-side composite it lies in;
+                # after scaling each half is XPIXELS wide.
+                for x, y in pts:
+                    x, y = x * SCALE_FACTOR, y * SCALE_FACTOR
+                    if x < XPIXELS:
+                        cam_points.append((frame, left_cam, x, y))
+                    else:
+                        cam_points.append((frame, right_cam, x - XPIXELS, y))
+            elif len(pts) >= 2:
+                # Separate (non-stitched) images: one shape holds both corners,
+                # the leftmost being the left camera's.
+                pts_sorted = sorted(pts, key=lambda t: t[0])
+                (x_left, y_left), (x_right, y_right) = pts_sorted[0], pts_sorted[-1]
+                cam_points.append((frame, left_cam, x_left * SCALE_FACTOR, y_left * SCALE_FACTOR))
+                cam_points.append((frame, right_cam, x_right * SCALE_FACTOR, y_right * SCALE_FACTOR))
 
-            pts_sorted = sorted(pts, key=lambda t: t[0])
-            (x_left, y_left), (x_right, y_right) = pts_sorted[0], pts_sorted[-1]
-            x_left, y_left, x_right, y_right = np.array(
-                [x_left, y_left, x_right, y_right]
-            ) * SCALE_FACTOR
-            # For stitched annotations: shift right cam by width if coords exceed midline
-            if annot_stitched and x_right > (XPIXELS / 2):
-                x_right = x_right - XPIXELS
-
-            # Corner points are kept in top-left origin (image convention)
-            # to match trajectory coordinates and all other pixel data
-
+        # Corner points are kept in top-left origin (image convention)
+        # to match trajectory coordinates and all other pixel data
+        for frame, cam, x, y in cam_points:
             # Only add records for cameras that have this frame
-            if left_cam in cam_max_frames and frame <= cam_max_frames[left_cam]:
+            if cam in cam_max_frames and frame <= cam_max_frames[cam]:
                 records.append(
                     {
                         "hive": hive,
                         "frame": frame,
-                        "cam": left_cam,
-                        "corner_x": float(x_left),
-                        "corner_y": float(y_left),
-                    }
-                )
-
-            if right_cam in cam_max_frames and frame <= cam_max_frames[right_cam]:
-                records.append(
-                    {
-                        "hive": hive,
-                        "frame": frame,
-                        "cam": right_cam,
-                        "corner_x": float(x_right),
-                        "corner_y": float(y_right),
+                        "cam": cam,
+                        "corner_x": float(x),
+                        "corner_y": float(y),
                     }
                 )
 
@@ -260,6 +266,19 @@ def corner_points_from_annotations(
         print("ERROR: No usable point annotations found in XMLs.")
         return pd.DataFrame(
             columns=["hive", "cam", "timestamp", "corner_x", "corner_y", "midday_utc"]
+        )
+
+    dup = points_by_frame.duplicated(["cam", "frame"], keep=False)
+    if dup.any():
+        dup_summary = (
+            points_by_frame[dup]
+            .groupby(["hive", "cam"])["frame"]
+            .agg(first_frame="min", last_frame="max", n_points="count")
+        )
+        raise ValueError(
+            "More than one corner point for the same camera on the same frame - each "
+            "camera needs exactly one (look for a duplicate or leftover corner track, "
+            "or two points on the same half of the video):\n" + dup_summary.to_string()
         )
 
     merged = (
