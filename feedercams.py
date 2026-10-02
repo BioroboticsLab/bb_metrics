@@ -4,8 +4,9 @@ Feeder/exit cam detection processing (step 1 companion).
 Functions:
  - get_df_feedercam: clean/standardize per-detection DataFrame.
  - get_average_counts_daily: average counts per 30s chunk.
+ - get_average_counts_from_parquet: same, streamed from a daily file in row-group chunks.
  - process_datedir: combine per-video parquet into one per-day file.
- - process_daily_files: compute average counts for daily files.
+ - process_daily_files: compute average counts for daily files (low-RAM, parallel).
 
 Plotting companions (step 3 "Feederplots"):
  - cam_hive_map: build {f"{which}{hive}": hive} from cfg.hives.
@@ -111,6 +112,42 @@ def get_df_feedercam(df: pd.DataFrame, timezone: str = "Europe/Berlin") -> pd.Da
     return df_feedercam
 
 
+# Columns of a daily detection file that the average counts need (x/y/orientation/
+# bee_id are never read for averaging), and the avgcounts output columns.
+_AVG_INPUT_COLUMNS = [
+    "cam_id", "video_start_timestamp", "timestamp", "detection_type",
+    "localizerSaliency", "bee_id_confidence",
+]
+_AVG_OUTPUT_COLUMNS = ["cam_id", "video_start_timestamp", "totalcounts", "untaggedcounts", "taggedcounts"]
+_FRAME_KEYS = ["cam_id", "video_start_timestamp", "timestamp"]
+
+
+def _counts_per_frame(
+    df: pd.DataFrame, localizer_threshold: float, bee_id_confidence_threshold: float
+) -> pd.DataFrame:
+    """Detection counts per frame (index = _FRAME_KEYS) after the localizer and
+    tagged-bee confidence filters. Frames with no surviving detection are absent.
+    Vectorized sums (no per-group lambdas) on the kept rows only, no full-frame copy.
+    """
+    is_tagged = df["detection_type"] == "TaggedBee"
+    keep = (df["localizerSaliency"] > localizer_threshold) & ~(
+        is_tagged & (df["bee_id_confidence"] < bee_id_confidence_threshold)
+    )
+    kept = df.loc[keep, _FRAME_KEYS].assign(
+        totalcounts=1,
+        untaggedcounts=(df.loc[keep, "detection_type"] == "UnmarkedBee").astype("int64"),
+        taggedcounts=is_tagged[keep].astype("int64"),
+    )
+    return kept.groupby(_FRAME_KEYS, sort=False, observed=True).sum()
+
+
+def _average_frame_counts(frames: pd.DataFrame) -> pd.DataFrame:
+    """Per-frame counts -> mean per (cam_id, video_start_timestamp) clip, sorted by clip."""
+    if frames.empty:
+        return pd.DataFrame(columns=_AVG_OUTPUT_COLUMNS)
+    return frames.groupby(level=["cam_id", "video_start_timestamp"]).mean().reset_index()
+
+
 def get_average_counts_daily(
     df: pd.DataFrame,
     *,
@@ -118,36 +155,53 @@ def get_average_counts_daily(
     bee_id_confidence_threshold: float = 0.0,
 ) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(
-            columns=["cam_id", "video_start_timestamp", "totalcounts", "untaggedcounts", "taggedcounts"]
-        )
-
-    filtered = df[df["localizerSaliency"] > localizer_threshold].copy()
-    low_conf_tagged = (filtered["detection_type"] == "TaggedBee") & (
-        filtered["bee_id_confidence"] < bee_id_confidence_threshold
-    )
-    filtered = filtered[~low_conf_tagged]
-
-    counts_per_frame = (
-        filtered.groupby(["cam_id", "video_start_timestamp", "timestamp"])
-        .agg(
-            totalcounts=("detection_type", "size"),
-            untaggedcounts=("detection_type", lambda x: (x == "UnmarkedBee").sum()),
-            taggedcounts=("detection_type", lambda x: (x == "TaggedBee").sum()),
-        )
-        .reset_index()
+        return pd.DataFrame(columns=_AVG_OUTPUT_COLUMNS)
+    return _average_frame_counts(
+        _counts_per_frame(df, localizer_threshold, bee_id_confidence_threshold)
     )
 
-    avg_counts = (
-        counts_per_frame.groupby(["cam_id", "video_start_timestamp"])
-        .agg(
-            totalcounts=("totalcounts", "mean"),
-            untaggedcounts=("untaggedcounts", "mean"),
-            taggedcounts=("taggedcounts", "mean"),
-        )
-        .reset_index()
-    )
-    return avg_counts
+
+def _row_group_chunks(metadata: "pq.FileMetaData", chunk_rows: int):
+    """Yield lists of consecutive row-group indices totalling >= chunk_rows rows
+    (the last list may be smaller; a single larger row group is its own chunk)."""
+    idxs, n = [], 0
+    for i in range(metadata.num_row_groups):
+        idxs.append(i)
+        n += metadata.row_group(i).num_rows
+        if n >= chunk_rows:
+            yield idxs
+            idxs, n = [], 0
+    if idxs:
+        yield idxs
+
+
+def get_average_counts_from_parquet(
+    file: Union[str, Path],
+    *,
+    localizer_threshold: float = 0.1,
+    bee_id_confidence_threshold: float = 0.0,
+    chunk_rows: int = 2_000_000,
+) -> pd.DataFrame:
+    """Same result as get_average_counts_daily(pd.read_parquet(file)), but streamed.
+
+    Reads only _AVG_INPUT_COLUMNS, ~chunk_rows rows (whole row groups) at a time,
+    keeping just the small per-frame counts, so peak memory is one chunk plus the
+    per-frame table instead of the whole day (exitcam days reach 60M+ rows).
+    """
+    parts = []
+    with pq.ParquetFile(file) as pf:
+        for idxs in _row_group_chunks(pf.metadata, chunk_rows):
+            df = pf.read_row_groups(idxs, columns=_AVG_INPUT_COLUMNS, use_threads=False).to_pandas()
+            counts = _counts_per_frame(df, localizer_threshold, bee_id_confidence_threshold)
+            del df
+            if not counts.empty:
+                parts.append(counts)
+    if not parts:
+        return pd.DataFrame(columns=_AVG_OUTPUT_COLUMNS)
+    # A frame can span chunks (legacy daily files have 1M-row row groups): re-sum
+    # its partial counts before averaging.
+    frames = pd.concat(parts).groupby(level=_FRAME_KEYS, sort=False).sum()
+    return _average_frame_counts(frames)
 
 
 # Output columns produced by get_df_feedercam, in order. Used for the empty
@@ -284,7 +338,7 @@ def _process_daily_file_worker(args):
     Worker function for parallel processing of daily files.
     Must be at module level to be picklable by multiprocessing.
     """
-    file, avg_dir, recalc, localizer_threshold, bee_id_confidence_threshold = args
+    file, avg_dir, recalc, localizer_threshold, bee_id_confidence_threshold, chunk_rows = args
     outfile = avg_dir / Path(file).name
 
     if recalc is False:
@@ -304,11 +358,11 @@ def _process_daily_file_worker(args):
     # recalc is True -> always recompute (neither branch taken)
 
     try:
-        df = pd.read_parquet(file)
-        avg = get_average_counts_daily(
-            df,
+        avg = get_average_counts_from_parquet(
+            file,
             localizer_threshold=localizer_threshold,
             bee_id_confidence_threshold=bee_id_confidence_threshold,
+            chunk_rows=chunk_rows,
         )
         avg.to_parquet(outfile)
         return ("ok", str(file))
@@ -325,12 +379,18 @@ def process_daily_files(
     localizer_threshold: float = 0.1,
     bee_id_confidence_threshold: float = 0.01,
     processes: int = 2,
+    chunk_rows: int = 2_000_000,
 ):
     """Compute average counts for a list of daily parquet files.
 
     recalc: True (always recompute), False (skip readable existing outputs,
     status "skip"), or 'ifnewer' (recompute only when the source file is newer
     than the output, status "skip_up_to_date").
+
+    Each file is streamed in ~chunk_rows-row chunks (get_average_counts_from_parquet),
+    so per-worker memory does not grow with the day's detection count. Each worker
+    process handles one file and then exits (maxtasksperchild=1), returning its
+    memory to the OS.
     """
     from multiprocessing import Pool
 
@@ -346,12 +406,14 @@ def process_daily_files(
 
     # Prepare arguments for worker function
     worker_args = [
-        (file, avg_dir, recalc, localizer_threshold, bee_id_confidence_threshold)
+        (file, avg_dir, recalc, localizer_threshold, bee_id_confidence_threshold, chunk_rows)
         for file in daily_files
     ]
 
-    with Pool(processes=processes) as pool:
-        results = pool.map(_process_daily_file_worker, worker_args)
+    # imap with chunksize=1: one file per task (big exitcam days are not batched onto
+    # one worker), results in input order like map.
+    with Pool(processes=processes, maxtasksperchild=1) as pool:
+        results = list(pool.imap(_process_daily_file_worker, worker_args, chunksize=1))
     return results
 
 

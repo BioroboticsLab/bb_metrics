@@ -172,3 +172,135 @@ def test_load_avgcounts_missing_avgdir_raises(monkeypatch):
     monkeypatch.setattr(fc, "get_config", lambda: types.SimpleNamespace(hives=("A",)))
     with pytest.raises(ValueError):
         fc.load_avgcounts("feedercam")
+
+
+# --------------------------- average counts (streamed vs legacy) ---------------------------
+
+def _legacy_average_counts(df, localizer_threshold, bee_id_confidence_threshold):
+    """Verbatim pre-streaming get_average_counts_daily (lambda groupby): reference oracle."""
+    if df.empty:
+        return pd.DataFrame(
+            columns=["cam_id", "video_start_timestamp", "totalcounts", "untaggedcounts", "taggedcounts"]
+        )
+
+    filtered = df[df["localizerSaliency"] > localizer_threshold].copy()
+    low_conf_tagged = (filtered["detection_type"] == "TaggedBee") & (
+        filtered["bee_id_confidence"] < bee_id_confidence_threshold
+    )
+    filtered = filtered[~low_conf_tagged]
+
+    counts_per_frame = (
+        filtered.groupby(["cam_id", "video_start_timestamp", "timestamp"])
+        .agg(
+            totalcounts=("detection_type", "size"),
+            untaggedcounts=("detection_type", lambda x: (x == "UnmarkedBee").sum()),
+            taggedcounts=("detection_type", lambda x: (x == "TaggedBee").sum()),
+        )
+        .reset_index()
+    )
+
+    avg_counts = (
+        counts_per_frame.groupby(["cam_id", "video_start_timestamp"])
+        .agg(
+            totalcounts=("totalcounts", "mean"),
+            untaggedcounts=("untaggedcounts", "mean"),
+            taggedcounts=("taggedcounts", "mean"),
+        )
+        .reset_index()
+    )
+    return avg_counts
+
+
+LOC_THR, CONF_THR = 0.1, 0.01
+
+
+def _daily_detections(seed=0):
+    """Synthetic daily detection frame shaped like process_datedir output.
+
+    2 cams x 3 clips x 6 frames, 0-6 detections per frame, three detection types,
+    NaN saliency / confidence, one fully-filtered frame and one fully-filtered clip.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    t0 = pd.Timestamp("2026-07-19 10:00:00")
+    for cam in ("exitcamA", "exitcamB"):
+        for clip in range(3):
+            vst = t0 + pd.Timedelta(seconds=30 * clip)
+            for frame in range(6):
+                ts = vst + pd.Timedelta(seconds=frame / 6)
+                for _ in range(rng.integers(0, 7)):
+                    dtype = rng.choice(["TaggedBee", "UnmarkedBee", "BeeInCell"])
+                    rows.append({
+                        "timestamp": ts, "video_start_timestamp": vst,
+                        "x_pixels": rng.uniform(0, 100), "y_pixels": rng.uniform(0, 100),
+                        "orientation": rng.uniform(-3, 3), "detection_type": dtype,
+                        "cam_id": cam, "bee_id": float(rng.integers(0, 4096)) if dtype == "TaggedBee" else np.nan,
+                        "bee_id_confidence": rng.uniform(0, 0.03) if dtype == "TaggedBee" else np.nan,
+                        "localizerSaliency": rng.uniform(0, 0.3),
+                    })
+    df = pd.DataFrame(rows)
+    df.loc[rng.random(len(df)) < 0.1, "localizerSaliency"] = np.nan
+    tagged = df["detection_type"] == "TaggedBee"
+    df.loc[tagged & (rng.random(len(df)) < 0.2), "bee_id_confidence"] = np.nan
+    first_ts = df["timestamp"].iloc[0]
+    df.loc[df["timestamp"] == first_ts, "localizerSaliency"] = 0.0          # frame fully filtered
+    df.loc[(df["cam_id"] == "exitcamB") & (df["video_start_timestamp"] == t0 + pd.Timedelta(seconds=30)),
+           "localizerSaliency"] = 0.0                                         # clip fully filtered
+    df["timestamp"] = df["timestamp"].dt.tz_localize("Europe/Berlin")
+    df["video_start_timestamp"] = df["video_start_timestamp"].dt.tz_localize("Europe/Berlin").astype(
+        "datetime64[us, Europe/Berlin]")
+    return df.sort_values("timestamp", kind="stable").reset_index(drop=True)
+
+
+def test_average_counts_daily_matches_legacy():
+    df = _daily_detections()
+    out = fc.get_average_counts_daily(df, localizer_threshold=LOC_THR, bee_id_confidence_threshold=CONF_THR)
+    pd.testing.assert_frame_equal(out, _legacy_average_counts(df, LOC_THR, CONF_THR))
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 10, 10**9])
+def test_average_counts_from_parquet_matches_legacy(tmp_path, chunk_rows):
+    # tiny row groups so frames and clips span row groups and chunks
+    path = tmp_path / "20260719_exitcam-c.parquet"
+    _daily_detections().to_parquet(path, row_group_size=7)
+    expected = _legacy_average_counts(pd.read_parquet(path), LOC_THR, CONF_THR)
+    out = fc.get_average_counts_from_parquet(
+        path, localizer_threshold=LOC_THR, bee_id_confidence_threshold=CONF_THR, chunk_rows=chunk_rows)
+    pd.testing.assert_frame_equal(out, expected)
+    # the fully-filtered clip is absent, as in legacy
+    assert len(out) == 5
+
+
+def test_average_counts_from_parquet_all_filtered(tmp_path):
+    path = tmp_path / "20260719_exitcam-c.parquet"
+    df = _daily_detections()
+    df["localizerSaliency"] = 0.0
+    df.to_parquet(path, row_group_size=7)
+    out = fc.get_average_counts_from_parquet(
+        path, localizer_threshold=LOC_THR, bee_id_confidence_threshold=CONF_THR, chunk_rows=10)
+    assert out.empty
+    assert list(out.columns) == fc._AVG_OUTPUT_COLUMNS
+
+
+def test_process_daily_files_pool_and_ifnewer(tmp_path, monkeypatch):
+    monkeypatch.setattr(fc, "get_config", lambda: _cfg())
+    files = []
+    for seed, day in enumerate(["20260719", "20260720"]):
+        f = tmp_path / f"{day}_exitcam-c.parquet"
+        _daily_detections(seed).to_parquet(f, row_group_size=7)
+        files.append(f)
+    avg_dir = tmp_path / "avgcounts"
+    kw = dict(avg_dir=avg_dir, localizer_threshold=LOC_THR, bee_id_confidence_threshold=CONF_THR,
+              processes=2, chunk_rows=10)
+
+    results = fc.process_daily_files(files, recalc=True, **kw)
+    assert [r[0] for r in results] == ["ok", "ok"]
+    assert [r[1] for r in results] == [str(f) for f in files]           # input order kept
+    for f in files:
+        pd.testing.assert_frame_equal(
+            pd.read_parquet(avg_dir / f.name),
+            _legacy_average_counts(pd.read_parquet(f), LOC_THR, CONF_THR),
+        )
+
+    results = fc.process_daily_files(files, recalc="ifnewer", **kw)
+    assert [r[0] for r in results] == ["skip_up_to_date", "skip_up_to_date"]
