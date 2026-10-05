@@ -1067,6 +1067,19 @@ def get_valid_timestamp_starts(hive, df_datafiles: pd.DataFrame):
     return timestamp_starts[valid_mask]
 
 
+# Columns process_timestamp_chunk actually reads. Naming them matters a lot here:
+# the detection parquets average ~353 MB, /mnt/share delivers only ~10 MB/s no matter
+# how many readers run in parallel, and localizer_saliency alone is 47% of every file
+# while this analysis never touches it. Parquet is columnar, so listing the columns
+# skips those bytes on the wire entirely: measured on a 372 MB file, 40.3s for the
+# whole file against 6.5s for these four. It also cuts the ~5x in-RAM expansion.
+#   timestamp - segment boundaries and the unique-timestamp count
+#   cam_id    - getxyhist/getframehist shift camera 1 to the right of camera 0
+#   x_pixels  - histogram, after rotation into the analysis frame
+#   y_pixels  - ditto
+DETECTION_HIST_COLUMNS = ["timestamp", "cam_id", "x_pixels", "y_pixels"]
+
+
 def process_timestamp_chunk(
     timestamp_start,
     timestamp_end,
@@ -1113,7 +1126,18 @@ def process_timestamp_chunk(
         print(error_msg)
         raise ValueError(error_msg)
 
-    df = pd.concat((pd.read_parquet(f) for f in datafiles), ignore_index=True)
+    # pyarrow directly, not pd.read_parquet(columns=...): the saving comes from
+    # pre_buffer coalescing the pruned column ranges into a few large reads, which is
+    # what this high-latency CIFS mount needs. Measured on one 372 MB file: 40.3s for
+    # the whole file, 6.5s via read_table(columns=...), but 32.4s through pandas and
+    # 20.8s with pre_buffer=False. to_pandas() itself costs ~0.4s.
+    import pyarrow.parquet as pq
+
+    df = pd.concat(
+        (pq.read_table(f, columns=DETECTION_HIST_COLUMNS).to_pandas()
+         for f in datafiles),
+        ignore_index=True,
+    )
 
     # Handle case where all files are empty (no detections during this period)
     if df.empty or len(df) == 0:
