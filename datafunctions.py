@@ -1492,10 +1492,16 @@ def build_grid_metadata_df(combined_df: pd.DataFrame, grid_dir: Path, ds: int):
     return ann_df
 
 
+def _to_ns(timestamps) -> np.ndarray:
+    """Timestamps as int64 nanoseconds, whatever their datetime resolution. pandas 3 keeps
+    the microseconds of parquet files, so astype("int64") alone can mix us and ns."""
+    return pd.DatetimeIndex(pd.to_datetime(timestamps)).as_unit("ns").asi8
+
+
 class GridLookup:
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
-        self.df["ts_ns"] = pd.to_datetime(self.df["timestamp"]).astype("int64")
+        self.df["ts_ns"] = _to_ns(self.df["timestamp"])
 
         # per-cam sorted index of timestamps and grid paths
         self.index = {}
@@ -1539,7 +1545,7 @@ class GridLookup:
         if cam not in self.index:
             raise KeyError(f"cam {cam} not in grid index")
 
-        ts_ns = pd.to_datetime(timestamps).astype("int64").to_numpy()
+        ts_ns = _to_ns(timestamps)
         ts_arr = self.index[cam]["ts_ns"]
         paths = self.index[cam]["grid_path"]
 
@@ -1569,7 +1575,7 @@ class GridLookup:
         if cam not in self.index:
             raise KeyError(f"cam {cam} not in grid index")
 
-        ts_ns = pd.to_datetime(timestamp).value
+        ts_ns = _to_ns([timestamp])[0]
         ts_arr = self.index[cam]["ts_ns"]
         paths = self.index[cam]["grid_path"]
 

@@ -110,3 +110,17 @@ def test_dict_form_annotation_file(tmp_path):
 def test_swapped_raw_dims_rejected():
     with pytest.raises(ValueError, match="does not match"):
         dfunc.grid_frame_size(RAW_H, RAW_W, get_rotation_config(CFG))
+
+
+def test_nearest_grid_ignores_datetime_resolution():
+    # pandas 3 keeps parquet's microseconds; grids and detections may differ in resolution
+    days = pd.to_datetime(["2026-06-23", "2026-06-28", "2026-10-06"], utc=True)
+    q = pd.Timestamp("2026-06-23 12:00", tz="UTC")
+    for grid_unit in ("us", "ns"):
+        df = pd.DataFrame({"cam": 0, "timestamp": days.as_unit(grid_unit), "grid_path": ["a", "b", "c"]})
+        lookup = dfunc.GridLookup(df)
+        for q_unit in ("us", "ns"):
+            assert lookup._nearest_grid_path(0, q.as_unit(q_unit)) == "a"
+            qs = pd.Series([q, q + pd.Timedelta(days=4)]).dt.as_unit(q_unit)
+            assert list(lookup._nearest_grid_paths(0, qs.to_numpy())) == ["a", "b"]
+            assert list(lookup._nearest_grid_paths(0, qs)) == ["a", "b"]
