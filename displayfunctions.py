@@ -4,7 +4,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import cv2
-from .datafunctions import get_hive_cam0
+from .datafunctions import get_hive_cam0, read_annotation_cells
 
 snscolors=sns.color_palette()
 snscolors = np.concatenate((snscolors,snscolors))
@@ -570,6 +570,7 @@ def plot_annotated_row(
     raw_w=None,
     raw_h=None,
     print_debug=False,
+    grid_frame="recording",
 ):
     """
     Plot annotated comb image with cell labels.
@@ -616,6 +617,9 @@ def plot_annotated_row(
         Raw image width (required if rgba_grid is provided)
     raw_h : int, optional
         Raw image height (required if rgba_grid is provided)
+    grid_frame : str
+        Frame of ``rgba_grid``: "recording" (rotated along with the image) or
+        "analysis" (already rotated, e.g. built with ``rot_cfg``; overlaid as is).
 
     Returns
     -------
@@ -703,10 +707,11 @@ def plot_annotated_row(
             # Set alpha to 0 for those pixels
             rgba_grid_copy[empty_mask, 3] = 0.0
 
-        # Apply same rotation to grid as to image
+        # Apply same rotation to grid as to image (an analysis-frame grid already has it)
         if use_rotation_config and rot_cfg is not None:
             k = rot_cfg.numpy_rot90_k()
-            rgba_grid_disp = np.rot90(rgba_grid_copy, k=k) if k != 0 else rgba_grid_copy
+            rotate_grid = k != 0 and grid_frame == "recording"
+            rgba_grid_disp = np.rot90(rgba_grid_copy, k=k) if rotate_grid else rgba_grid_copy
             # Dimensions after rotation
             if k in (1, -1, 3):  # 90° rotations
                 disp_w = raw_h
@@ -716,7 +721,8 @@ def plot_annotated_row(
                 disp_h = raw_h
         else:
             # Fallback for backward compatibility
-            rgba_grid_disp = np.rot90(rgba_grid_copy, k=-1) if rotate_clockwise else rgba_grid_copy
+            rotate_grid = rotate_clockwise and grid_frame == "recording"
+            rgba_grid_disp = np.rot90(rgba_grid_copy, k=-1) if rotate_grid else rgba_grid_copy
             disp_w = raw_h if rotate_clockwise else raw_w
             disp_h = raw_w if rotate_clockwise else raw_h
         extent = (0, disp_w, disp_h, 0)
@@ -751,8 +757,7 @@ def plot_annotated_row(
         if not ann_path.exists():
             raise ValueError(f"annotation_path not found: {ann_path}")
 
-        with open(ann_path, "r") as f:
-            cells = json.load(f)
+        cells = read_annotation_cells(ann_path)
 
         if print_debug:
             print(f"\nAnnotation mode:")

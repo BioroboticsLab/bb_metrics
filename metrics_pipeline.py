@@ -70,6 +70,10 @@ def run_metrics_from_pairs(
     if metrics_dir is None:
         raise ValueError("metrics_dir not set (pass metrics_dir or set cfg.metrics_dir)")
 
+    # combhist looks up analysis-frame trajectory coordinates in the comb grids.
+    if grid_lookup is not None:
+        grid_lookup.check_frame("analysis")
+
     # Minimum tracked time required to compute metrics for a (bee, time-segment).
     # Expressed in SECONDS and converted to a detection count per file using the
     # fps inferred from that file's timestamps (in datafile_to_metrics), so the

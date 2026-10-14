@@ -751,10 +751,21 @@ def get_onsubstrate(dfday, obs_threshold=5, topfraction_threshold=0.5, substrate
 # Annotation + grid utilities (comb background)
 ###########################################################################################################################
 
-def load_annotation_json(json_path: str | Path):
-    json_path = Path(json_path)
+def read_annotation_cells(json_path: str | Path) -> list:
+    """Cell list of an annotation-tool JSON.
+
+    The tool saves a bare list of cells, or ``{..., "annotations": [...]}`` once a
+    breakpoint or corner pin has been set on the image.
+    """
     with open(json_path, "r") as f:
         cells = json.load(f)
+    if isinstance(cells, dict):
+        cells = cells["annotations"]
+    return cells
+
+
+def load_annotation_json(json_path: str | Path):
+    cells = read_annotation_cells(json_path)
 
     rows = []
     for cell in cells:
@@ -1227,6 +1238,23 @@ def build_label_index(label_order, keep_labels, other_label, off_comb_label=None
     return label_order, label_to_idx
 
 
+def grid_frame_size(raw_w, raw_h, rot_cfg=None):
+    """``(frame, width, height)`` of the frame a label grid covers.
+
+    Annotations are drawn on the recording-frame background (``raw_w`` x ``raw_h``).
+    With a ``rot_cfg`` the grid is built in the analysis frame instead, like the
+    trajectories; without one it stays in the recording frame (grids before 2026-10).
+    """
+    if rot_cfg is None:
+        return "recording", int(raw_w), int(raw_h)
+    if (int(raw_w), int(raw_h)) != (int(rot_cfg.original_width), int(rot_cfg.original_height)):
+        raise ValueError(
+            f"raw_w x raw_h = {raw_w} x {raw_h} does not match the recording frame of the "
+            f"rotation config ({rot_cfg.original_width} x {rot_cfg.original_height})"
+        )
+    return "analysis", int(rot_cfg.analysis_width), int(rot_cfg.analysis_height)
+
+
 def compute_label_grid_idx(
     annotation_path,
     raw_w,
@@ -1238,6 +1266,7 @@ def compute_label_grid_idx(
     chunk_rows=256,
     off_comb_label=None,
     off_comb_threshold=None,
+    rot_cfg=None,
 ):
     """
     Compute label grid indices for downsampled annotation grid.
@@ -1265,14 +1294,17 @@ def compute_label_grid_idx(
     off_comb_threshold : float, optional
         Distance threshold in pixels. Grid cells farther than this from any annotation
         will be labeled as off_comb_label. Defaults to ds (one grid cell spacing).
+    rot_cfg : RotationConfig, optional
+        If given, the cell centres are rotated from the recording frame into the
+        analysis frame (the same transform the trajectories get), and the grid covers
+        the analysis frame. If None, the grid stays in the recording frame (legacy).
 
     Returns
     -------
     label_grid_idx : np.ndarray
         Grid of label indices, shape (grid_h, grid_w)
     """
-    with open(annotation_path, "r") as f:
-        cells = json.load(f)
+    cells = read_annotation_cells(annotation_path)
 
     centers = np.array([[c["center_x"], c["center_y"]] for c in cells], dtype=np.float32)
     labels_idx = np.array(
@@ -1280,13 +1312,18 @@ def compute_label_grid_idx(
         dtype=np.int16,
     )
 
-    grid_w = int(np.ceil(raw_w / ds))
-    grid_h = int(np.ceil(raw_h / ds))
+    _, frame_w, frame_h = grid_frame_size(raw_w, raw_h, rot_cfg)
+    if rot_cfg is not None and centers.size:
+        x_a, y_a = rot_cfg.apply_rotation_pixels(centers[:, 0], centers[:, 1])
+        centers = np.column_stack([x_a, y_a]).astype(np.float32)
+
+    grid_w = int(np.ceil(frame_w / ds))
+    grid_h = int(np.ceil(frame_h / ds))
 
     xs = (np.arange(grid_w, dtype=np.float32) + 0.5) * ds
     ys = (np.arange(grid_h, dtype=np.float32) + 0.5) * ds
-    xs = np.clip(xs, 0, raw_w - 1)
-    ys = np.clip(ys, 0, raw_h - 1)
+    xs = np.clip(xs, 0, frame_w - 1)
+    ys = np.clip(ys, 0, frame_h - 1)
 
     label_grid_idx = np.full((grid_h, grid_w), label_to_idx[other_label], dtype=np.int16)
 
@@ -1334,7 +1371,13 @@ def compute_label_grid_idx(
     return label_grid_idx
 
 
-def save_grid_npz(out_path, label_grid_idx, ds, raw_w, raw_h, label_order):
+def save_grid_npz(
+    out_path, label_grid_idx, ds, raw_w, raw_h, label_order,
+    frame="recording", width=None, height=None,
+):
+    """Save a label grid. ``raw_w``/``raw_h`` are the annotated image's size;
+    ``frame``/``width``/``height`` describe the frame the grid covers (see
+    ``grid_frame_size``)."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -1344,7 +1387,17 @@ def save_grid_npz(out_path, label_grid_idx, ds, raw_w, raw_h, label_order):
         raw_w=np.array(raw_w, dtype=np.int32),
         raw_h=np.array(raw_h, dtype=np.int32),
         label_order=np.array(label_order, dtype=object),
+        frame=np.array(frame),
+        width=np.array(raw_w if width is None else width, dtype=np.int32),
+        height=np.array(raw_h if height is None else height, dtype=np.int32),
     )
+
+
+def read_grid_frame(path) -> str:
+    """Frame a saved label grid covers. Grids saved before the ``frame`` key
+    existed were all built in the recording frame."""
+    with np.load(path, allow_pickle=True) as data:
+        return str(data["frame"]) if "frame" in data.files else "recording"
 
 
 def process_one_annotation(
@@ -1360,6 +1413,7 @@ def process_one_annotation(
     chunk_rows=256,
     off_comb_label=None,
     off_comb_threshold=None,
+    rot_cfg=None,
 ):
     """
     Process one annotation file and save as downsampled grid.
@@ -1392,6 +1446,9 @@ def process_one_annotation(
     off_comb_threshold : float, optional
         Distance threshold in pixels. Grid cells farther than this from any annotation
         will be labeled as off_comb_label. Defaults to ds (one grid cell spacing).
+    rot_cfg : RotationConfig, optional
+        Build the grid in the analysis frame (see ``compute_label_grid_idx``). An
+        existing grid in a different frame is rebuilt even when ``recalc`` is False.
 
     Returns
     -------
@@ -1400,7 +1457,8 @@ def process_one_annotation(
     """
     annotation_path = Path(annotation_path)
     out_path = Path(output_dir) / f"{annotation_path.stem}_ds_{ds}.npz"
-    if out_path.exists() and not recalc:
+    frame, frame_w, frame_h = grid_frame_size(raw_w, raw_h, rot_cfg)
+    if out_path.exists() and not recalc and read_grid_frame(out_path) == frame:
         return str(out_path), "skip"
 
     label_order, label_to_idx = build_label_index(label_order, keep_labels, other_label, off_comb_label)
@@ -1415,8 +1473,12 @@ def process_one_annotation(
         chunk_rows=chunk_rows,
         off_comb_label=off_comb_label,
         off_comb_threshold=off_comb_threshold,
+        rot_cfg=rot_cfg,
     )
-    save_grid_npz(out_path, label_grid_idx, ds, raw_w, raw_h, label_order)
+    save_grid_npz(
+        out_path, label_grid_idx, ds, raw_w, raw_h, label_order,
+        frame=frame, width=frame_w, height=frame_h,
+    )
     return str(out_path), "saved"
 
 
@@ -1450,10 +1512,27 @@ class GridLookup:
         data = np.load(path_str, allow_pickle=True)
         label_grid = data["label_grid"]
         ds = int(data["ds"])
-        raw_w = int(data["raw_w"])
-        raw_h = int(data["raw_h"])
+        # width/height of the frame the grid covers; older grids only have raw_w/raw_h
+        w = int(data["width"]) if "width" in data.files else int(data["raw_w"])
+        h = int(data["height"]) if "height" in data.files else int(data["raw_h"])
         label_order = list(data["label_order"])
-        return label_grid, ds, raw_w, raw_h, label_order
+        return label_grid, ds, w, h, label_order
+
+    def check_frame(self, expected: str = "analysis"):
+        """Raise if any indexed grid is not in the ``expected`` frame.
+
+        Trajectory coordinates are in the analysis frame, so metrics need analysis-frame
+        grids. Recording-frame grids (built without ``rot_cfg``) would silently read
+        labels from a transposed spot of the comb.
+        """
+        paths = pd.unique(self.df["grid_path"].astype(str))
+        wrong = [p for p in paths if read_grid_frame(p) != expected]
+        if wrong:
+            raise ValueError(
+                f"{len(wrong)} of {len(paths)} comb grids are not in the {expected} frame "
+                f"(e.g. {wrong[0]}). Rebuild them with '1 - Comb images and annotations' "
+                f"(process_one_annotation with rot_cfg=get_rotation_config(cfg))."
+            )
 
     def _nearest_grid_paths(self, cam: int, timestamps):
         cam = int(cam)
