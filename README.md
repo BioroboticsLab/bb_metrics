@@ -12,6 +12,9 @@ A Python package for processing and analyzing honey bee behavioral data from Bee
 
 The package supports multi-hive experiments with configurable experimental setups and treatment schedules.
 
+**Metric definitions:** see [METRICS.md](METRICS.md) for what every metric column means, its
+units, thresholds and code location.
+
 ## Installation
 
 ```bash
@@ -380,21 +383,18 @@ Parquet files with columns:
 
 ### Metrics Files
 
-Parquet files with one row per bee per time segment:
-- Bee info: `hive`, `bee_id`, `timestamp_start`, `timestamp_end`, `num_detections`
-- Movement: `dispersion`, `speed_median`, `speed_iqr`, `num_trips`
-- Spatial: `fraction_squares_visited`, `exit_distance_median`
-- Comb usage: `frame_0_hist` through `frame_3_hist`, centermedian values
-- Activity: `inplace_events`, `burst_events`, `large_turn_events`
-- Social: `numbees0`, `numbees1`, `numbees2`
-- Comb state: `combhist_empty_cell`, `combhist_open_brood`, etc.
+`metrics-<time_division>-Hive_<H>_<start>Z--<end>Z.parquet`: one file per hive per hour, with one
+row per bee per time segment that passed the detection gate. With `save_xy_hist=True` and
+segments of at least 60 min, each file has a companion `xyhist-<time_division>-Hive_...h5`. The day
+matrix (`daydatamat.csv`) aggregates the segment metrics per bee and local day.
+
+Every column is defined in **[METRICS.md](METRICS.md)**.
 
 ### Visit Files
 
-Parquet files with one row per visit:
-- `bee_id`, `cam_id`, `hive`
-- `start_time`, `end_time`
-- `duration_seconds`, `detection_count`
+`df_feedervisits.parquet` / `df_exitvisits.parquet`, one row per visit: `bee_id`, `visit_id`,
+`start_time`, `end_time`, `detection_count`, `cam_id`, `duration_seconds`. There is no `hive`
+column; derive it from the last character of `cam_id`. See METRICS.md §5.
 
 ## Tips and Best Practices
 
