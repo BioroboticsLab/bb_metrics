@@ -2,7 +2,6 @@ import numpy as np
 import pickle
 import os
 from pathlib import Path
-import h5py
 import gzip
 from datetime import datetime
 import pandas as pd
@@ -244,6 +243,24 @@ def compute_surrounding_bee_counts(dfbee, dict_detections_hive, detection_keys, 
     return average_results
 
 
+def hive_save_name_for(hive, datafiles):
+    """Output name stem for a hive-hour pair, e.g. Hive_B_2024-08-27T03_00_00Z--2024-08-27T04_00_00Z.parquet.
+
+    Per-camera files (2024+) start with 'Cam_<id>_'; strip that so the save name is
+    'Hive_<hive>_<ISO>--<ISO>'. Combined files (2016/2019) have both cameras in one file and
+    no 'Cam_' prefix, so keep the full name (prefixed with '_'). Both cases yield a name that
+    parse_hive_name / parse_data_file_timestamps can read downstream (e.g. build_day_xyhist).
+    """
+    src_name = Path(datafiles[0]).name  # data files already time-matched; use the first
+    name_suffix = src_name[5:] if src_name.startswith('Cam_') else ('_' + src_name)
+    return 'Hive_' + hive + name_suffix
+
+
+def metrics_file_for(hive, datafiles, time_division, metrics_dir):
+    """Path of the metrics parquet datafile_to_metrics writes for this pair."""
+    return Path(metrics_dir) / f"metrics-{time_division}-{hive_save_name_for(hive, datafiles)}"
+
+
 def datafile_to_metrics(
     hive,
     timestamp_start,
@@ -259,6 +276,11 @@ def datafile_to_metrics(
     grid_lookup=None,
     comb_label_order=None,
 ):
+    """Compute metrics for one hive-hour pair and write metrics-<td>-Hive_*.parquet.
+
+    Returns a status string: "written", "skipped" (up to date), "empty" (no bee-segment
+    passed the gate, nothing written) or "error: <exception>".
+    """
     cfg = get_config()
     try:
         metrics_dir = Path(metrics_dir)
@@ -266,16 +288,7 @@ def datafile_to_metrics(
         if pd.Timedelta(time_division) < pd.Timedelta('60min'):
             save_xy_hist = False
 
-        # set filenames for saving
-        # these should be e.g. metrics-5min-Hive_B_2024-08-27T03_00_00Z--2024-08-27T09_00_00Z.parquet
-        # Per-camera files (2024+) start with 'Cam_<id>_'; strip that so the save name
-        # is 'Hive_<hive>_<ISO>--<ISO>'. Combined files (2016/2019) have both cameras in
-        # one file and no 'Cam_' prefix, so keep the full name (prefixed with '_'). Both
-        # cases yield a name that parse_hive_name / parse_data_file_timestamps can read
-        # downstream (e.g. build_day_xyhist).
-        _src_name = Path(datafiles[0]).name  # data files already time-matched; use the first
-        _name_suffix = _src_name[5:] if _src_name.startswith('Cam_') else ('_' + _src_name)
-        hive_save_name = 'Hive_' + hive + _name_suffix
+        hive_save_name = hive_save_name_for(hive, datafiles)
         metricsfile = metrics_dir / f"metrics-{time_division}-{hive_save_name}"
         xyhistfile = metrics_dir / f"xyhist-{time_division}-{hive_save_name.replace('.parquet', '.h5')}"
 
@@ -284,9 +297,9 @@ def datafile_to_metrics(
                 newest_src_ts = max(os.path.getmtime(d) for d in datafiles)
                 metrics_ts = metricsfile.stat().st_mtime
                 if newest_src_ts <= metrics_ts:
-                    return
+                    return "skipped"
             else:
-                return
+                return "skipped"
 
         df = pd.concat([pd.read_parquet(d) for d in datafiles])
 
@@ -335,6 +348,7 @@ def datafile_to_metrics(
 
         # Open HDF5 file for writing xyhist data if save_xy_hist is True
         if save_xy_hist:
+            import h5py  # only needed for xyhist (60min); keeps the metrics path free of h5py
             hdf_file = h5py.File(xyhistfile, 'w')
 
         # Loop over each time segment
@@ -413,11 +427,14 @@ def datafile_to_metrics(
 
             df_metrics.to_parquet(metricsfile)
             print('Wrote metrics to', os.path.basename(metricsfile))
+            return "written"
         else:
             print('Skipping, no content')
+            return "empty"
 
     except Exception as e:
         print('Error with', datafiles, ':', e)
+        return f"error: {e!r}"
 
 
 def save_xyhist_to_hdf(hdf_file, bee_id, time_segment_start, time_segment_end, xyhist):

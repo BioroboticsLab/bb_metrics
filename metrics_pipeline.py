@@ -4,8 +4,10 @@ and computing feeder/exit visit tables.
 """
 
 import glob
+import json
 import multiprocessing
 import os
+import subprocess
 from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
@@ -47,6 +49,15 @@ def build_pairs_from_traj(all_datafiles: Iterable[Path], cam_hive_map: dict) -> 
     return pairs, unmatched
 
 
+def default_min_track_seconds(time_division: str) -> float:
+    """Default tracked-time gate per time division (90/30/12 detections at 6 fps)."""
+    if time_division == "60min":
+        return 15.0
+    if time_division == "5min":
+        return 5.0
+    return 2.0  # "1min" and any finer/other division
+
+
 def run_metrics_from_pairs(
     pairs: List[tuple],
     *,
@@ -81,12 +92,7 @@ def run_metrics_from_pairs(
     # These defaults reproduce the historical counts (90/30/12) exactly at 6 fps.
     # `min_num_detections`, if given, is an explicit count override (fps-independent).
     if min_num_detections is None and min_track_seconds is None:
-        if time_division == "60min":
-            min_track_seconds = 15.0   # 90 detections at 6 fps
-        elif time_division == "5min":
-            min_track_seconds = 5.0    # 30 detections at 6 fps
-        else:                           # "1min" and any finer/other division
-            min_track_seconds = 2.0    # 12 detections at 6 fps
+        min_track_seconds = default_min_track_seconds(time_division)
 
     args = [
         (
@@ -109,6 +115,249 @@ def run_metrics_from_pairs(
 
     with multiprocessing.Pool(processes=num_processes) as pool:
         pool.starmap(mfunc.datafile_to_metrics, args)
+
+
+# ---------------------------------------------------------------------------
+# Cluster runs: the same per-pair work as run_metrics_from_pairs, as a batch job.
+#
+# A run lives in a run directory, by default <metrics_dir>/_cluster/<td>-<stamp>/:
+#   RUN.json        run parameters, read back by every worker (python -m bb_metrics.run_metrics)
+#   pairs.jsonl     the pairs submitted (one {hive, start, end, datafiles} per line)
+#   status/*.jsonl  one line per processed pair, written by the workers
+# The submission itself (chunking, Indexed Job, kubectl) is done by bb_hpc
+# (running_k8s/metrics_submit.py), which reads RUN.json and pairs.jsonl.
+# ---------------------------------------------------------------------------
+
+def _pair_to_json(pair) -> dict:
+    hive, start, end, datafiles = pair
+    return {
+        "hive": hive,
+        "start": pd.Timestamp(start).isoformat(),
+        "end": pd.Timestamp(end).isoformat(),
+        "datafiles": [str(f) for f in datafiles],
+    }
+
+
+def write_pairs_file(pairs: List[tuple], path: Path) -> Path:
+    """Write pairs as JSONL (timestamps as ISO strings)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for pair in pairs:
+            f.write(json.dumps(_pair_to_json(pair)) + "\n")
+    return path
+
+
+def read_pairs_file(path: Path) -> List[tuple]:
+    """Read a pairs JSONL file back into (hive, start, end, datafiles) tuples."""
+    pairs = []
+    with open(path) as f:
+        for line in f:
+            if line.strip():
+                d = json.loads(line)
+                pairs.append((d["hive"], pd.Timestamp(d["start"]), pd.Timestamp(d["end"]), d["datafiles"]))
+    return pairs
+
+
+def bb_metrics_commit() -> str:
+    """Git commit of the bb_metrics code in use ('unknown' if not a git checkout)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        dirty = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        return out.stdout.strip() + ("-dirty" if dirty else "")
+    except Exception:
+        return "unknown"
+
+
+def read_status(run_dirs: Iterable[Path]) -> pd.DataFrame:
+    """Per-pair worker status lines from one or more run directories (latest line per output wins)."""
+    rows = []
+    for run_dir in run_dirs:
+        for sf in sorted(Path(run_dir).glob("status/*.jsonl")):
+            with open(sf) as f:
+                rows.extend(json.loads(line) for line in f if line.strip())
+    if not rows:
+        return pd.DataFrame(columns=["output", "status", "seconds", "finished", "bb_metrics_commit"])
+    df = pd.DataFrame(rows).sort_values("finished")
+    return df.drop_duplicates("output", keep="last").reset_index(drop=True)
+
+
+def _cluster_run_dirs(metrics_dir: Path, time_division: str) -> List[Path]:
+    return sorted((Path(metrics_dir) / "_cluster").glob(f"{time_division}-*"))
+
+
+def pending_pairs(
+    pairs: List[tuple],
+    time_division: str,
+    metrics_dir: Path,
+    *,
+    reprocess: bool = False,
+    update: bool = True,
+) -> List[tuple]:
+    """Pairs that still need computing: output missing, or older than its sources (when update).
+
+    Hours an earlier cluster run found empty (no output written by design) are not resubmitted
+    unless reprocess. Uses the same skip rule as datafile_to_metrics.
+    """
+    if reprocess:
+        return list(pairs)
+    empty = set()
+    st = read_status(_cluster_run_dirs(metrics_dir, time_division))
+    if len(st):
+        empty = set(st.loc[st["status"] == "empty", "output"])
+    out = []
+    for pair in pairs:
+        hive, _, _, datafiles = pair
+        mf = mfunc.metrics_file_for(hive, datafiles, time_division, metrics_dir)
+        if mf.exists():
+            if not update:
+                continue
+            if max(os.path.getmtime(d) for d in datafiles) <= mf.stat().st_mtime:
+                continue
+        elif str(mf) in empty:
+            continue
+        out.append(pair)
+    return out
+
+
+def prepare_metrics_run(
+    cfg_path,
+    time_division: str,
+    *,
+    metrics_dir: Optional[Path] = None,
+    min_track_seconds: Optional[float] = None,
+    min_num_detections: Optional[float] = None,
+    grid_parquet: Optional[Path] = None,
+    save_xy_hist: bool = False,
+    reprocess: bool = False,
+    update: bool = True,
+    pairs: Optional[List[tuple]] = None,
+) -> Optional[Path]:
+    """Write a run directory (RUN.json + pairs.jsonl) for the pending pairs; None if nothing is pending.
+
+    Builds the pairs from cfg.traj_outdir unless `pairs` is given. The gate works as in
+    run_metrics_from_pairs: min_track_seconds defaults by time division, and an explicit
+    min_num_detections is a raw count that overrides it. `grid_parquet`
+    (annotation_grids_ds_<ds>.parquet) enables the comb histograms.
+    """
+    import bb_metrics
+    from datetime import datetime, timezone
+
+    cfg_path = Path(cfg_path).resolve()
+    cfg = bb_metrics.load_config(cfg_path)
+    metrics_dir = Path(metrics_dir or cfg.metrics_dir)
+    if min_num_detections is None and min_track_seconds is None:
+        min_track_seconds = default_min_track_seconds(time_division)
+
+    if pairs is None:
+        pairs, unmatched = build_pairs_from_traj(sorted(Path(cfg.traj_outdir).glob("*.parquet")), cfg.cam_hive_map)
+        if unmatched:
+            print(f"{len(unmatched)} unmatched trajectory files/groups (not submitted)")
+    todo = pending_pairs(pairs, time_division, metrics_dir, reprocess=reprocess, update=update)
+    print(f"pairs: {len(pairs)}, pending: {len(todo)}")
+    if not todo:
+        return None
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = metrics_dir / "_cluster" / f"{time_division}-{stamp}"
+    (run_dir / "status").mkdir(parents=True, exist_ok=True)
+    write_pairs_file(todo, run_dir / "pairs.jsonl")
+    record = {
+        "config_path": str(cfg_path),
+        "metrics_dir": str(metrics_dir),
+        "time_division": time_division,
+        "min_track_seconds": min_track_seconds,
+        "min_num_detections": min_num_detections,
+        "grid_parquet": str(grid_parquet) if grid_parquet else None,
+        "save_xy_hist": bool(save_xy_hist),
+        "reprocess": bool(reprocess),
+        "update": bool(update),
+        "n_pairs": len(todo),
+        "n_pairs_total": len(pairs),
+        "created": datetime.now(timezone.utc).isoformat(),
+        "submit_bb_metrics_commit": bb_metrics_commit(),
+        "run_dir": str(run_dir),
+    }
+    (run_dir / "RUN.json").write_text(json.dumps(record, indent=2))
+    return run_dir
+
+
+def submit_metrics_cluster(
+    cfg_path,
+    time_division: str,
+    *,
+    bb_hpc_dir,
+    dry_run: bool = False,
+    workers: Optional[int] = None,
+    chunk_size: Optional[int] = None,
+    **run_kwargs,
+) -> dict:
+    """Submit metrics for all pending hive-hour pairs as one k8s Indexed Job (via bb_hpc).
+
+    Writes the run directory with prepare_metrics_run (run_kwargs: metrics_dir, min_track_seconds,
+    min_num_detections, grid_parquet, save_xy_hist, reprocess, update, pairs), then calls
+    bb_hpc's running_k8s.metrics_submit, which chunks pairs.jsonl into an Indexed Job.
+    Workers read every parameter from RUN.json, so the record is what ran.
+    Returns the run record (dict, with the k8s job name); check progress with check_metrics_complete.
+    """
+    import sys
+
+    run_dir = prepare_metrics_run(cfg_path, time_division, **run_kwargs)
+    if run_dir is None:
+        return {}
+    cmd = [sys.executable, "-m", "bb_hpc.running_k8s.metrics_submit", "--run-dir", str(run_dir)]
+    if dry_run:
+        cmd.append("--dry-run")
+    if workers is not None:
+        cmd += ["--workers", str(int(workers))]
+    if chunk_size is not None:
+        cmd += ["--chunk-size", str(int(chunk_size))]
+    subprocess.run(cmd, cwd=str(Path(bb_hpc_dir).resolve().parent), check=True)
+
+    # metrics_submit adds the k8s job name to RUN.json
+    return json.loads((run_dir / "RUN.json").read_text())
+
+
+def check_metrics_complete(
+    pairs: List[tuple],
+    time_division: str,
+    metrics_dir: Path,
+) -> pd.DataFrame:
+    """One row per pair with its output state: ok, empty (hour had no bee passing the gate),
+    error, or missing (not processed yet / pod died). Status comes from the cluster status logs;
+    an existing output file always counts as ok.
+    """
+    st = read_status(_cluster_run_dirs(metrics_dir, time_division))
+    st = st.set_index("output") if len(st) else st
+    rows = []
+    for hive, start, end, datafiles in pairs:
+        mf = mfunc.metrics_file_for(hive, datafiles, time_division, metrics_dir)
+        last = st.loc[str(mf)] if len(st) and str(mf) in st.index else None
+        if mf.exists():
+            state = "ok"
+        elif last is None:
+            state = "missing"
+        elif last["status"] == "empty":
+            state = "empty"
+        elif str(last["status"]).startswith("error"):
+            state = "error"
+        else:
+            state = "missing"
+        rows.append({
+            "hive": hive, "start": start, "end": end, "output": str(mf), "state": state,
+            "status": None if last is None else last["status"],
+            "bb_metrics_commit": None if last is None else last.get("bb_metrics_commit"),
+        })
+    df = pd.DataFrame(rows)
+    if len(df):
+        print(df["state"].value_counts().to_string())
+    return df
 
 
 def define_feeder_visits(df: pd.DataFrame, visit_gap_seconds: int = 15, confidence_threshold: float = 0.01) -> pd.DataFrame:

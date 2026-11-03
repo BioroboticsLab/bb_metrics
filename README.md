@@ -197,6 +197,23 @@ mp.run_metrics_from_pairs(
 - `metrics-5min-{start}-{end}.parquet` (5-min aggregation)
 - Can also generate hourly (`60min`) aggregations
 
+**On a cluster.** The same per-pair work can run as a batch job, one worker per shard of
+hive-hour pairs (`python -m bb_metrics.run_metrics`). The Kubernetes submission lives in bb_hpc
+(`running_k8s/metrics_submit.py`):
+
+```python
+run = mp.submit_metrics_cluster(cfg_path, "1min", bb_hpc_dir="/path/to/bb_hpc", grid_parquet=None)
+df_check = mp.check_metrics_complete(pairs, "1min", cfg.metrics_dir)  # ok / empty / error / missing
+```
+
+- Only pending pairs are submitted: missing outputs, or outputs older than their trajectories.
+  Re-running resubmits only the rest.
+- Each run writes `metrics_dir/_cluster/<td>-<stamp>/`:
+  - `RUN.json` holds all parameters, and the workers read it;
+  - `pairs.jsonl` lists the pairs;
+  - `status/*.jsonl` has one line per pair.
+- `prepare_metrics_run` writes the run directory without submitting.
+
 ### Step 2b: Calculate Visit Metrics
 
 **Notebook**: `2 - Calculate metrics.ipynb` (continuation)
