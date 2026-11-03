@@ -22,6 +22,11 @@ large_turn = 2*np.pi
 large_turn_time = 2 # sec
 all_detections_dt = '60s'
 
+# Per-segment gap-boundary columns (4-frame geometry only): where and when the bee was first/last seen in the
+# segment, for building gaps between segments (trip rule). Not averaged into the day matrix.
+GAP_BOUNDARY_COLS = ('exit_edge_dist_first', 'exit_edge_dist_last', 'exit_edge_dist_min',
+                     't_first_s', 't_last_s', 'cam_first', 'cam_last')
+
 # for calculations with all detections
 
 
@@ -371,6 +376,7 @@ def datafile_to_metrics(
                         time_segment_end,
                         grid_lookup=grid_lookup,
                         comb_label_order=comb_label_order,
+                        timestamp_start=time_segment_start,
                     )
                     # Calculate density of surrounding bees:
                     if len(detection_keys)>0:
@@ -477,8 +483,9 @@ def _compute_combhist(dfbee, grid_lookup, comb_label_order=None):
     return combhist, comb_label_order
 
 
-def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
-    """Input is dfbee, already selected for a certain amount of time."""
+def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None, timestamp_start=None):
+    """Input is dfbee, already selected for a certain amount of time.
+    timestamp_start: start of the segment, for t_first_s / t_last_s (NaN if None)."""
     cfg = get_config()
     dfbee = dfbee.sort_values(by='timestamp')
     dfbee = dfbee.reset_index(drop=True)
@@ -606,6 +613,17 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
         exitdist = np.sqrt( (dfbee['x_hive_flat']-x_exit)**2 + (y_exitdist-y_exit)**2 )
         exitdist_median = np.median(exitdist)
 
+        # Gap-boundary features: distance from the exit edge (y_hive = 0 by definition, same on both cams since the
+        # y axis is shared; not clipped, so detections in the bottom slot are slightly negative), time since the
+        # segment start, and side (0 = cam0, 1 = cam0+1), at the first and last detection
+        edge_dist = -dfbee['y_hive'].to_numpy()
+        cam_side = dfbee['cam_id'].to_numpy() - cam0
+        if timestamp_start is not None:
+            t_first_s = (dfbee['timestamp'].iloc[0] - timestamp_start).total_seconds()
+            t_last_s = (dfbee['timestamp'].iloc[-1] - timestamp_start).total_seconds()
+        else:
+            t_first_s, t_last_s = np.nan, np.nan
+
         # Distance from center of current frame
         framebins = [-cfg.offset_div_cm*2-10, -cfg.offset_div_cm, 10] # set limits to cover the frame (negative y_hive coords)
         # get 'framenum' as digitized label
@@ -666,7 +684,14 @@ def get_metrics(dfbee, last_df_time, grid_lookup=None, comb_label_order=None):
             'frame_3_centermedian': median_distances[3],
             'inplace_events': inplace_events,
             'burst_events': burst_events,
-            'large_turn_events': large_turn_events
+            'large_turn_events': large_turn_events,
+            'exit_edge_dist_first': edge_dist[0],
+            'exit_edge_dist_last': edge_dist[-1],
+            'exit_edge_dist_min': np.min(edge_dist),
+            't_first_s': t_first_s,
+            't_last_s': t_last_s,
+            'cam_first': int(cam_side[0]),
+            'cam_last': int(cam_side[-1]),
         }
     else:
         # 2-frame / non-standard comb layout: geometry-independent metrics only

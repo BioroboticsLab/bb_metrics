@@ -232,7 +232,7 @@ def build_day_data_matrix(
 
     if weightedmeanqs is None:
         numeric_cols = df_metrics.select_dtypes(include=[np.number]).columns.tolist()
-        exclude = set(sumqs + ["bee_id", "uid", "daynum", "Hour", "daysinevals"])
+        exclude = set(sumqs + ["bee_id", "uid", "daynum", "Hour", "daysinevals"] + list(mfunc.GAP_BOUNDARY_COLS))
         weightedmeanqs = [col for col in numeric_cols if col not in exclude]
 
     group_keys = ["hive", "bee_id", "uid", "daynum", "day"] if has_uid else ["hive", "bee_id", "daynum", "day"]

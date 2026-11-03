@@ -45,7 +45,8 @@ The coordinates used are these:
 `pixels_per_cm`. `exit_distance_median`, `num_trips` and `frame_*` also need the corner point,
 `offset_div_cm` and `frame_width_cm` (`dispersion` needs `frame_width_cm` too). If
 `cfg.compute_frame_exit_metrics` is `False` (non-standard comb layouts), `num_trips`,
-`exit_distance_median` and all `frame_*` columns are omitted (`metricsfunctions.py:593`).
+`exit_distance_median`, all `frame_*` columns and the gap-boundary columns (`exit_edge_dist_*`, `t_*_s`,
+`cam_*`) are omitted (`metricsfunctions.py:598`).
 
 ## 2. Segments and the inclusion gate
 
@@ -81,6 +82,10 @@ Computed in `get_metrics` (`metricsfunctions.py:480`) unless noted. Column order
 | `inplace_events` | count | Runs of consecutive valid steps with speed < `moving_threshold` (0.05 cm/s) whose summed duration is ≥ `inplace_time_threshold` (15 s). Any invalid step (camera switch, gap > 1 s) ends a run (l.507). |
 | `burst_events` | count | Runs of consecutive steps with speed > `burst_threshold` (0.3 cm/s) whose summed duration is ≥ `burst_time_threshold` (2 s) (l.530). |
 | `large_turn_events` | count | Number of times the accumulated absolute orientation change exceeds `large_turn` (2π, one full turn) within a `large_turn_time` (2 s) window (l.552). After an event, or when the window is exceeded, accumulation restarts. |
+| `exit_edge_dist_first`, `exit_edge_dist_last` | cm | Distance from the exit edge, `−y_hive`, at the bee's first / last detection in the segment. The exit edge is `y_hive = 0` by definition (the corner point is set there), and the y axis is shared by both cameras. Not clipped: detections in the bottom slot give small negative values. |
+| `exit_edge_dist_min` | cm | Minimum of `−y_hive` over the segment (the bee's closest approach to the exit edge). |
+| `t_first_s`, `t_last_s` | s | Time from `timestamp_start` to the bee's first / last detection in the segment, in `[0, segment length)`. Lets a gap builder time gaps between segments to the second. |
+| `cam_first`, `cam_last` | 0/1 | Side of the comb at the first / last detection: 0 = the hive's first camera (`cam0`), 1 = the second (`cam0 + 1`). |
 | `numbees0`, `numbees1`, `numbees2` | detections/frame | Local density (`compute_surrounding_bee_counts`, `metricsfunctions.py:189`); see the rule below. |
 | `combhist_<label>` | 0–1 | Only when metrics are run with a `GridLookup`. Fraction of the bee's detections on each comb label (`_compute_combhist`, `metricsfunctions.py:448`); see the rule below. |
 
@@ -125,6 +130,9 @@ all-detections data exists for the segment.
 - **Segment length:** `fraction_squares_visited`, the event counts and `num_trips` grow with the
   tracked time in the segment. To compare across segments or bees, normalise by tracked time
   (`num_detections / fps`).
+- **Gap-boundary columns** (`exit_edge_dist_*`, `t_*_s`, `cam_*`) describe where and when the bee entered and
+  left view within the segment. They are meant for 1-min segments, as inputs to a gap/trip rule, and are not
+  carried into the day matrix.
 - **`large_turn_events` caveats:**
   - Orientation changes are not restricted to same-camera steps or to `dt ≤ max_delay`.
   - Each orientation change is paired with the time step before it, an off-by-one in the
@@ -144,7 +152,7 @@ one segment row that day.
 | `daynum` | `day_to_number[day]`; usually `cfg.day_to_number`, where 0 is `cfg.startday`. |
 | `uid` | Only when `dftags` is given: `bee_id + 4096 × generation` (`uid.assign_uid`). |
 | `num_detections`, `num_trips`, `inplace_events`, `burst_events`, `large_turn_events` | **Sums** over the day's segments (`sumqs`). |
-| every other numeric segment column (`dispersion`, `speed_*`, `fraction_squares_visited`, `exit_distance_median`, `frame_*`, `numbees*`, `combhist_*`) | **Mean weighted by `num_detections`**: `nansum(value × w) / nansum(w)` (l.219). |
+| every other numeric segment column (`dispersion`, `speed_*`, `fraction_squares_visited`, `exit_distance_median`, `frame_*`, `numbees*`, `combhist_*`) | **Mean weighted by `num_detections`**: `nansum(value × w) / nansum(w)` (l.219). The gap-boundary columns (`metricsfunctions.GAP_BOUNDARY_COLS`) are excluded. |
 | `speed_circadian_coeff` | `Σ speed_median · sin(2π (h − (peak − 6)) / 24) · w / Σ speed_median · w`, where `h` is the local hour of `timestamp_start` (including minutes), `w = num_detections` and `peak = daysine_peaktime` (the sine peaks at `peak`). Range −1..1: positive means speed concentrated around `peak`, negative around `peak ± 12 h`. Without `daysine_peaktime`, the sine is `sin(2π h / 24)`. |
 | `num_feeder_visits`, `num_exit_visits` | Number of visits that **started** on that local day (see §5). 0 if none. |
 | `feeder_visit_duration_mean`, `exit_visit_duration_mean` | Mean visit `duration_seconds` that day. **0 (not NaN) when there were no visits**, so exclude zero-visit days before averaging durations. |
