@@ -318,10 +318,12 @@ against decoder noise.
 - **`metrics_pipeline.py`** - High-level pipeline functions for pairing files and dispatching metric calculations
 - **`metricsfunctions.py`** - Core metric computation functions (movement, spatial, comb histograms)
 - **`feedercams.py`** - Feeder/exit camera detection processing and visit calculation
-- **`calibration.py`** - Camera calibration, corner detection, pixel-to-cm conversion
+- **`calibration.py`** - Camera calibration, corner detection, pixel-to-cm conversion; tag orientation -> analysis-frame heading (`calibrate_orientation`, `heading`, `load_orientation`, recorded per season in `saved_output/calibration/orientation.json`)
 - **`rotation.py`** - Coordinate system rotation utilities
 - **`lifespan.py`** - Exact birth/death changepoint posteriors per uid, tag-log reconciliation, detection-cut calibration, free-tag calls
 - **`uid.py`** - uid (tag generation) assignment from the tag-introduction table
+- **`tables.py`** - `load_metrics(period, cfg, start, end, hives, columns)`: the one way analyses read binned per-bee metrics (1/5/60 min). Filters files by time range, adds `uid`, uses `allmetrics-<period>.parquet` only when it is newer than every per-hour file. The returned columns are the contract, so the source can later become a Mosaic run without changing analyses
+- **`events.py`** - the generic experimenter-event table (`hive, event_id, kind, t_start, t_end, cam, cell_id, x_px, y_px, notes`, analysis-frame location): `validate_events`, `load_events`, `snap_to_cells`. Parsing an experiment's own sheet stays in the experiment repo
 - **`saved_output.py`** - `find`/`load` the newest version of a shared table in `saved_output/<folder>/` (LATEST, `vN/`, `_vN` files), `next_version`/`set_latest` for writing a new version, `questions_dir` for layer 2 output (`<basedir>/questions_output/<question>/`). Experiment repos pass their mount points as `candidates`
 
 ### Utility Modules

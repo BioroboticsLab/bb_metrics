@@ -15,10 +15,12 @@ Read first:
 - `metricsfunctions.py`: per-segment metric computation (`get_metrics`, `datafile_to_metrics`).
 - `datafunctions.py`: loading, timestamps, `infer_fps`, histograms, comb annotations/grids, `GridLookup`, weather.
 - `feedercams.py`: Pi feeder/exit detections → daily parquets, avgcounts, hourly averages.
-- `calibration.py`: corner points and px/cm from CVAT annotations; constant fallback tables.
+- `calibration.py`: corner points and px/cm from CVAT annotations; constant fallback tables; tag orientation calibration (`calibrate_orientation`, `heading`, `load_orientation` from `saved_output/calibration/orientation.json`).
 - `rotation.py`: recording frame ↔ analysis frame (cw90).
 - `lifespan.py`: exact birth/death changepoint model, tag-log reconciliation, free-tag calls.
 - `uid.py`: `uid = bee_id + 4096 × generation` from the tag-introduction table.
+- `tables.py`: `load_metrics` — the only way analyses should read binned metrics (keeps the source swappable for Mosaic later).
+- `events.py`: generic experimenter-event table format (`validate_events`, `load_events`, `snap_to_cells`).
 - `saved_output.py`: versioned shared tables in `saved_output/<folder>/` (`find`, `load`, `next_version`, `set_latest`) and `questions_dir` for layer 2 output. Used by all experiment repos; storage mounts are passed in as `candidates`, never stored here.
 - `displayfunctions.py`: plotting helpers.
 

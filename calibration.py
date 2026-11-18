@@ -434,3 +434,70 @@ def constant_calibration_tables(
         pd.DataFrame(px_records).sort_values(["hive", "cam"]).reset_index(drop=True)
     )
     return df_cornerpoints, df_px_per_cm
+
+
+# ---------------------------------------------------------------------------
+# Tag orientation -> analysis-frame heading
+# ---------------------------------------------------------------------------
+# Trajectory `orientation` is the decoder's tag angle. The body heading in the analysis frame is
+#     heading = wrap(sign * orientation + offset)
+# with sign in {+1, -1} and offset in radians, per camera. Both are calibrated from data (travel
+# direction of clearly moving bees) and recorded per season in
+# saved_output/calibration/orientation.json, so every analysis uses the same values.
+
+def _wrap(a):
+    import numpy as np
+    return (np.asarray(a, float) + np.pi) % (2 * np.pi) - np.pi
+
+
+def calibrate_orientation(traj: pd.DataFrame, move_min_px: float = 8.0,
+                          move_max_px: float = 200.0, max_dt_s: float = 0.6) -> dict:
+    """Sign and offset that map `orientation` onto the travel direction of moving bees.
+
+    traj: one camera's trajectory rows (bee_id, timestamp, x_pixels, y_pixels, orientation),
+    analysis frame. Uses steps between consecutive detections of a bee that are short in time
+    (<= max_dt_s) and clearly displaced (move_min_px..move_max_px). Both signs are tried; the one
+    with the more concentrated residual wins. R (resultant length, 0..1) measures how well heading
+    follows travel; below ~0.3 the calibration is weak (bees also walk sideways and backwards).
+
+    Same method as the hygienic v6 notebook (Region 1), which gave +1 / -175.8 deg for Konstanz
+    2025 cam 1.
+    """
+    import numpy as np
+    d = traj.sort_values(["bee_id", "timestamp"])
+    g = d.groupby("bee_id")
+    dx = g["x_pixels"].diff().to_numpy()
+    dy = g["y_pixels"].diff().to_numpy()
+    dt = g["timestamp"].diff().dt.total_seconds().to_numpy()
+    step = np.hypot(dx, dy)
+    good = (np.isfinite(step) & (step >= move_min_px) & (step <= move_max_px)
+            & np.isfinite(dt) & (dt <= max_dt_s))
+    psi = np.arctan2(dy[good], dx[good])
+    ori = d["orientation"].to_numpy(float)[good]
+
+    def stats(resid):
+        r = _wrap(resid)
+        c, s = np.cos(r).mean(), np.sin(r).mean()
+        return float(np.arctan2(s, c)), float(np.hypot(c, s))
+
+    m_plus, r_plus = stats(psi - ori)      # sign +1
+    m_minus, r_minus = stats(psi + ori)    # sign -1
+    sign, off, R = (1, m_plus, r_plus) if r_plus >= r_minus else (-1, m_minus, r_minus)
+    return dict(sign=int(sign), offset_rad=off, offset_deg=float(np.degrees(off)), R=R,
+                R_other_sign=float(min(r_plus, r_minus)), n_steps=int(good.sum()),
+                move_min_px=move_min_px, move_max_px=move_max_px, max_dt_s=max_dt_s)
+
+
+def heading(orientation, sign: int, offset_rad: float):
+    """Analysis-frame body heading (radians, wrapped to [-pi, pi)) from tag orientation."""
+    import numpy as np
+    return _wrap(sign * np.asarray(orientation, float) + offset_rad)
+
+
+def load_orientation(cfg=None, cam=None, candidates=None) -> dict:
+    """The recorded orientation calibration, saved_output/calibration/orientation.json.
+    Returns {cam: {sign, offset_rad, ...}} with int keys, or one camera's entry if `cam` is given."""
+    from . import saved_output as so
+    rec = so.load("orientation", "calibration", cfg, verbose=False, candidates=candidates)
+    cams = {int(k): v for k, v in rec["cams"].items()}
+    return cams if cam is None else cams[int(cam)]
