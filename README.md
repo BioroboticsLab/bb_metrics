@@ -322,6 +322,7 @@ against decoder noise.
 - **`rotation.py`** - Coordinate system rotation utilities
 - **`lifespan.py`** - Exact birth/death changepoint posteriors per uid, tag-log reconciliation, detection-cut calibration, free-tag calls
 - **`uid.py`** - uid (tag generation) assignment from the tag-introduction table
+- **`saved_output.py`** - `find`/`load` the newest version of a shared table in `saved_output/<folder>/` (LATEST, `vN/`, `_vN` files), `next_version`/`set_latest` for writing a new version, `questions_dir` for layer 2 output (`<basedir>/questions_output/<question>/`). Experiment repos pass their mount points as `candidates`
 
 ### Utility Modules
 

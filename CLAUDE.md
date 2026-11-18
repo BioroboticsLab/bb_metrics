@@ -19,6 +19,7 @@ Read first:
 - `rotation.py`: recording frame ↔ analysis frame (cw90).
 - `lifespan.py`: exact birth/death changepoint model, tag-log reconciliation, free-tag calls.
 - `uid.py`: `uid = bee_id + 4096 × generation` from the tag-introduction table.
+- `saved_output.py`: versioned shared tables in `saved_output/<folder>/` (`find`, `load`, `next_version`, `set_latest`) and `questions_dir` for layer 2 output. Used by all experiment repos; storage mounts are passed in as `candidates`, never stored here.
 - `displayfunctions.py`: plotting helpers.
 
 ## Conventions
