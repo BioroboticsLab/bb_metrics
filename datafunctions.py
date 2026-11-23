@@ -51,8 +51,14 @@ def _get_bd():
 _FALLBACK_FPS = 6.0
 
 
-def infer_fps(timestamps, default=_FALLBACK_FPS, warn=True):
+def infer_fps(timestamps, default=_FALLBACK_FPS, warn=True, groups=None):
     """Infer the detection sampling rate (frames/sec) from timestamps.
+
+    Pass `groups` (e.g. df['cam_id']) when the timestamps come from several cameras.
+    Cameras are not frame-synchronized, so their merged unique timestamps interleave
+    and a single-stream estimate comes out ~n_cams times too high (two 6-fps cams
+    -> ~12 fps). With `groups`, fps is inferred per group and the median of the
+    per-group rates is returned (groups with < 2 distinct timestamps are skipped).
 
     fps = 1 / median(positive gaps between consecutive UNIQUE timestamps). Using
     unique timestamps collapses the multiple detections that share one frame; the
@@ -70,6 +76,15 @@ def infer_fps(timestamps, default=_FALLBACK_FPS, warn=True):
         float: estimated frames per second. `expected_dt = 1 / fps`.
     """
     import warnings
+    if groups is not None:
+        ts_s = pd.Series(list(timestamps))
+        g_s = pd.Series(list(groups), index=ts_s.index)
+        rates = [infer_fps(ts_s[g_s == g], default=default, warn=False)
+                 for g in pd.unique(g_s)
+                 if pd.to_datetime(ts_s[g_s == g]).nunique() >= 2]
+        if rates:
+            return float(np.median(rates))
+        return infer_fps([], default=default, warn=warn)
     arr = list(timestamps)
     if len(arr) >= 2:
         ts = pd.to_datetime(pd.Series(arr))
@@ -300,7 +315,8 @@ def filter_df_by_numdetections(df,min_time_detection_minutes=1,fps=None,time_col
     # counts. With no way to infer, infer_fps falls back to _FALLBACK_FPS (warns).
     if fps is None:
         if time_col in df.columns:
-            fps = infer_fps(df[time_col])
+            fps = infer_fps(df[time_col],
+                            groups=df['cam_id'] if 'cam_id' in df.columns else None)
         else:
             fps = infer_fps([], warn=True)
     min_num_detections = round(min_time_detection_minutes*60*fps)

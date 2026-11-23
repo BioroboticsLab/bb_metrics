@@ -309,7 +309,8 @@ def datafile_to_metrics(
         # min_num_detections (not None) overrides and is used as-is.
         if min_num_detections is None:
             mts = min_track_seconds if min_track_seconds is not None else 2.0
-            fps = dfunc.infer_fps(df['timestamp'])
+            # per camera: the two cams' frames interleave, so a merged estimate is ~2x too high
+            fps = dfunc.infer_fps(df['timestamp'], groups=df['cam_id'])
             min_num_detections = max(1, int(np.ceil(mts * fps)))
 
         # Generate time segments based on the specified time division

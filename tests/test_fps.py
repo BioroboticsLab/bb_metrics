@@ -99,3 +99,17 @@ def test_filter_df_by_numdetections_infers_fps_from_timestamps():
     out2 = dfunc.filter_df_by_numdetections(df.assign(num_detections=359),
                                             min_time_detection_minutes=1)
     assert len(out2) == 0
+
+
+def test_infer_fps_per_camera_groups():
+    # two unsynchronized 6-fps cameras: merged unique timestamps look like ~12 fps
+    a = _detection_times(6.0, 300, start="2025-08-01T09:00:00", dup=2)
+    b = _detection_times(6.0, 300, start="2025-08-01T09:00:00.07", dup=2)
+    ts = pd.concat([a, b], ignore_index=True)
+    cams = np.r_[np.zeros(len(a), int), np.ones(len(b), int)]
+    assert dfunc.infer_fps(ts) == pytest.approx(12.0, rel=0.2)   # the bug being guarded
+    assert dfunc.infer_fps(ts, groups=cams) == pytest.approx(6.0, rel=1e-6)
+    # one camera only, or a camera with a single frame, still works
+    assert dfunc.infer_fps(a, groups=np.zeros(len(a), int)) == pytest.approx(6.0, rel=1e-6)
+    lone = pd.concat([a, b.iloc[:1]], ignore_index=True)
+    assert dfunc.infer_fps(lone, groups=np.r_[np.zeros(len(a), int), [1]]) == pytest.approx(6.0, rel=1e-6)
