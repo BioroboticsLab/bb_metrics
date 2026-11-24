@@ -57,11 +57,19 @@ def get_valid_tags(dftags: Optional[pd.DataFrame], camdate, hive: str) -> Option
     if dftags is None or len(dftags) == 0:
         return None
 
-    camdate = pd.to_datetime(camdate)
+    # Compare as tz-naive UTC: camdate comes from the video filename (tz-aware UTC), while
+    # dftags["Date"] is a plain calendar date from the CSV (tz-naive). pandas refuses to
+    # compare the two (TypeError), which process_file would report only as "error".
+    camdate = pd.Timestamp(camdate)
+    if camdate.tzinfo is not None:
+        camdate = camdate.tz_convert("UTC").tz_localize(None)
 
     if not pd.api.types.is_datetime64_any_dtype(dftags["Date"]):
         dftags = dftags.copy()
         dftags["Date"] = pd.to_datetime(dftags["Date"], errors="coerce")
+    if getattr(dftags["Date"].dt, "tz", None) is not None:
+        dftags = dftags.copy()
+        dftags["Date"] = dftags["Date"].dt.tz_convert("UTC").dt.tz_localize(None)
 
     valid_rows = dftags[
         (dftags["Hive"].astype(str).str.upper() == str(hive).upper())
